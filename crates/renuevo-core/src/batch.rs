@@ -97,9 +97,14 @@ pub struct BatchJob {
 pub enum ItemStatus {
     Pending,
     Running,
-    Done { output: PathBuf, bytes: u64 },
+    Done {
+        output: PathBuf,
+        bytes: u64,
+    },
     Skipped(String),
     Failed(String),
+    /// El usuario canceló el lote mientras se procesaba esta foto.
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -141,6 +146,11 @@ pub fn run_batch(
         on_status(i, ItemStatus::Running);
         let result = (|| -> Result<u64> {
             let photo = open(input)?;
+            // Antes de procesar: WebP no admite más de 16383 px por lado.
+            let (w, h) = pipeline.output_size(photo.image.width(), photo.image.height());
+            if let Some(problem) = job.encode.format.size_problem(w, h) {
+                return Err(Error::Unsupported(problem));
+            }
             let encode = EncodeOptions {
                 dpi: pipeline.output_dpi(photo.info.dpi),
                 ..job.encode
@@ -161,7 +171,7 @@ pub fn run_batch(
             }
             Err(Error::Cancelled) => {
                 summary.cancelled = true;
-                on_status(i, ItemStatus::Failed("cancelado".to_owned()));
+                on_status(i, ItemStatus::Cancelled);
                 break;
             }
             Err(e) => {

@@ -250,18 +250,31 @@ impl Layer {
                     layer_rect.min.y + sy / sh * layer_rect.height(),
                 )
             };
-            // Ajustado a píxeles físicos: así el filtrado lineal no lo suaviza medio píxel.
-            let snap = |p: Pos2| pos2((p.x * ppp).round() / ppp, (p.y * ppp).round() / ppp);
-            let rect = Rect::from_min_max(
-                snap(src_to_screen(d.src[0] as f32, d.src[1] as f32)),
-                snap(src_to_screen(
-                    (d.src[0] + d.src[2]) as f32,
-                    (d.src[1] + d.src[3]) as f32,
-                )),
+            let rect = snap_rect(
+                src_to_screen(d.src[0] as f32, d.src[1] as f32),
+                vec2(
+                    d.src[2] as f32 / sw * layer_rect.width(),
+                    d.src[3] as f32 / sh * layer_rect.height(),
+                ),
+                ppp,
             );
             painter.image(tex.id(), rect, FULL_UV, Color32::WHITE);
         }
     }
+}
+
+/// Lleva un punto al píxel físico más cercano (las mitades, siempre hacia el mismo lado).
+fn snap_point(p: Pos2, ppp: f32) -> Pos2 {
+    let snap = |v: f32| (v * ppp + 0.5).floor() / ppp;
+    pos2(snap(p.x), snap(p.y))
+}
+
+/// Rectángulo ajustado a píxeles físicos sin cambiar su tamaño en píxeles: ajustar las dos
+/// esquinas por separado puede estirarlo un píxel, y entonces el filtrado lineal vuelve a
+/// muestrear toda la textura y la vista 1:1 se ve borrosa.
+pub(crate) fn snap_rect(min: Pos2, size: Vec2, ppp: f32) -> Rect {
+    let size = vec2((size.x * ppp).round() / ppp, (size.y * ppp).round() / ppp);
+    Rect::from_min_size(snap_point(min, ppp), size)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -427,8 +440,10 @@ impl Viewer {
             ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         }
 
+        // El origen, en un píxel físico: así, a 1:1, cada píxel de la foto cae en uno de la
+        // pantalla y el filtrado lineal no lo mezcla con el vecino.
         let img_rect = Rect::from_min_size(
-            view.center() - self.center.to_vec2() * self.zoom,
+            snap_point(view.center() - self.center.to_vec2() * self.zoom, ppp),
             self.image_size * self.zoom,
         );
         let idle = self.is_idle(now);
@@ -498,4 +513,20 @@ fn label(painter: &egui::Painter, pos: Pos2, align: Align2, text: &str) {
     let rect = align.anchor_size(pos, galley.size()).expand(4.0);
     painter.rect_filled(rect, 4.0, Color32::from_black_alpha(160));
     painter.galley(rect.min + vec2(4.0, 4.0), galley, Color32::WHITE);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapped_rect_keeps_its_size_in_physical_pixels() {
+        // Con las esquinas en medio píxel, redondearlas por separado lo estiraba a 1024.
+        for ppp in [1.0, 2.0] {
+            let r = snap_rect(pos2(-65.5 / ppp, -65.25), vec2(1023.0, 1023.0) / ppp, ppp);
+            assert_eq!(r.size() * ppp, vec2(1023.0, 1023.0));
+            assert_eq!((r.min.x * ppp).fract(), 0.0);
+            assert_eq!((r.min.y * ppp).fract(), 0.0);
+        }
+    }
 }

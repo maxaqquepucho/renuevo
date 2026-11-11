@@ -9,9 +9,14 @@ pub mod nlm;
 pub mod noise;
 pub mod sharpen;
 
+use rayon::prelude::*;
+
 use crate::color::{rgb_to_ycbcr, ycbcr_to_rgb};
-use crate::planar::Planar;
+use crate::filters::box_blur;
+use crate::planar::{Planar, finite, u8_to_f32, u16_to_f32};
 use crate::{Progress, Result};
+use deblock::BlockGrid;
+use noise::{Interleaved, PlanarRows};
 
 /// Intensidades en 0..1. Un 0 desactiva la etapa.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -93,32 +98,72 @@ pub struct RestoreReport {
 /// El enfoque ignora el detalle por debajo de este múltiplo del ruido estimado.
 const SHARPEN_CORING: f32 = 2.0;
 
+/// Radio (píxeles) del relleno del color oculto bajo α = 0 a partir del visible de alrededor.
+pub(crate) const FILL_RADIUS: usize = 8;
+
 /// Ruido medido en una foto (escala 0..1). Se mide una vez sobre la foto completa y se reutiliza,
 /// para que la vista previa de una zona y la exportación usen exactamente los mismos parámetros.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct NoiseLevels {
     pub luma: f32,
     pub chroma: f32,
+    /// Rejilla de bloques JPEG de la foto completa. Si falta, se detecta sobre lo que se procese.
+    pub grid: Option<BlockGrid>,
 }
 
-/// Mide el ruido de luminancia y de color de una foto.
+impl NoiseLevels {
+    /// Los mismos niveles vistos desde un recorte que empieza en (`x0`, `y0`) de la foto.
+    pub fn cropped(self, x0: usize, y0: usize) -> Self {
+        Self {
+            grid: self.grid.map(|g| g.cropped(x0, y0)),
+            ..self
+        }
+    }
+}
+
+/// Mide el ruido de luminancia y de color de una foto, y su rejilla de bloques JPEG.
+///
+/// Lee el búfer de 8/16 bits por bloques de filas en paralelo, sin copiar la foto a `f32`: la
+/// memoria extra es de unas pocas filas por hilo.
 pub fn estimate_noise(image: &image::DynamicImage) -> NoiseLevels {
-    let mut p = Planar::from_image(image);
-    rgb_to_ycbcr(&mut p);
-    noise_of_ycbcr(&p)
-}
-
-fn noise_of_ycbcr(p: &Planar) -> NoiseLevels {
-    let (w, h) = (p.width, p.height);
-    // JPEG/HEIC submuestrean el color: sus manchas abarcan bloques de 16×16.
-    NoiseLevels {
-        luma: noise::estimate_sigma(&p.channels[0], w, h),
-        chroma: noise::estimate_sigma_blocks(&p.channels[1], w, h, 16)
-            .max(noise::estimate_sigma_blocks(&p.channels[2], w, h, 16)),
+    use image::DynamicImage as D;
+    fn rows<T: Copy + Sync>(
+        raw: &[T],
+        image: &D,
+        channels: usize,
+        has_alpha: bool,
+        to_f32: fn(T) -> f32,
+    ) -> NoiseLevels {
+        noise::measure(&Interleaved {
+            raw,
+            width: image.width() as usize,
+            height: image.height() as usize,
+            channels,
+            has_alpha,
+            to_f32,
+        })
+    }
+    match image {
+        D::ImageLuma8(b) => rows(b.as_raw(), image, 1, false, u8_to_f32),
+        D::ImageLumaA8(b) => rows(b.as_raw(), image, 2, true, u8_to_f32),
+        D::ImageRgb8(b) => rows(b.as_raw(), image, 3, false, u8_to_f32),
+        D::ImageRgba8(b) => rows(b.as_raw(), image, 4, true, u8_to_f32),
+        D::ImageLuma16(b) => rows(b.as_raw(), image, 1, false, u16_to_f32),
+        D::ImageLumaA16(b) => rows(b.as_raw(), image, 2, true, u16_to_f32),
+        D::ImageRgb16(b) => rows(b.as_raw(), image, 3, false, u16_to_f32),
+        D::ImageRgba16(b) => rows(b.as_raw(), image, 4, true, u16_to_f32),
+        D::ImageRgb32F(b) => rows(b.as_raw(), image, 3, false, finite),
+        D::ImageRgba32F(b) => rows(b.as_raw(), image, 4, true, finite),
+        other => {
+            let rgba = other.to_rgba32f();
+            rows(rgba.as_raw(), image, 4, true, finite)
+        }
     }
 }
 
 /// Restaura `p`. Si `noise` es `None`, el ruido se mide sobre `p`.
+///
+/// Con alfa, `p` queda premultiplicado (ver [`Planar::premultiply`]); `to_image` lo deshace.
 pub fn restore(
     p: &mut Planar,
     params: &RestoreParams,
@@ -130,25 +175,35 @@ pub fn restore(
     if params.is_noop() || p.is_empty() {
         return Ok(report);
     }
+    p.premultiply();
     rgb_to_ycbcr(p);
-    // El ruido se mide sobre la foto tal como llega, antes de tocarla.
-    let levels = noise.unwrap_or_else(|| noise_of_ycbcr(p));
+    // El ruido y la rejilla se miden sobre la foto tal como llega, antes de tocarla.
+    let levels = noise.unwrap_or_else(|| noise::measure(&PlanarRows(p)));
+    let grid = levels
+        .grid
+        .or_else(|| noise::measure(&PlanarRows(p)).grid)
+        .unwrap_or_default();
     let (sigma, chroma_sigma) = (levels.luma, levels.chroma);
     report.noise_sigma_8bit = sigma * 255.0;
     report.chroma_sigma_8bit = chroma_sigma * 255.0;
 
+    // Los filtros trabajan con el color sin premultiplicar y el oculto bajo α = 0 rellenado con
+    // el visible de alrededor: ni ese color oculto ni el propio borde del alfa entran en el
+    // resultado. Al final se vuelve a premultiplicar.
+    unpremultiply_filled(p);
+
     if params.deblock > 0.0 {
-        progress.begin("Reduciendo bloques JPEG", 3);
-        for plane in p.channels.iter_mut() {
+        progress.begin("Reduciendo bloques JPEG", p.channels.len() as u64);
+        for (plane, g) in p.channels.iter_mut().zip(grid.planes) {
             progress.check()?;
-            report.blocking_detected |= deblock::deblock(plane, w, h, params.deblock);
+            report.blocking_detected |= deblock::deblock(plane, w, h, params.deblock, g);
             progress.advance(1);
         }
     }
 
-    let [y, cb, cr] = &mut p.channels;
-
-    if params.chroma_noise > 0.0 && !p.gray {
+    if let [_, cb, cr] = &mut p.channels[..]
+        && params.chroma_noise > 0.0
+    {
         progress.begin("Reduciendo ruido de color", 2);
         chroma::denoise_chroma(cb, w, h, params.chroma_noise, chroma_sigma);
         progress.advance(1);
@@ -156,6 +211,8 @@ pub fn restore(
         chroma::denoise_chroma(cr, w, h, params.chroma_noise, chroma_sigma);
         progress.advance(1);
     }
+
+    let y = &mut p.channels[0];
 
     if params.luma_noise > 0.0 && sigma > 0.0 {
         // Barrido sobre fotos reales degradadas: el óptimo está en h ≈ 1,4·σ.
@@ -175,6 +232,39 @@ pub fn restore(
         progress.advance(1);
     }
 
+    if let Some(alpha) = &p.alpha {
+        for plane in &mut p.channels {
+            plane
+                .par_iter_mut()
+                .zip(alpha.par_iter())
+                .for_each(|(c, a)| *c *= a);
+        }
+    }
     ycbcr_to_rgb(p);
     Ok(report)
+}
+
+/// Deshace la premultiplicación de `p` (en cualquier espacio lineal, también YCbCr). Donde α = 0
+/// pone la media del color visible en un radio de [`FILL_RADIUS`] ponderada por el alfa (0 si
+/// no hay nada visible cerca).
+fn unpremultiply_filled(p: &mut Planar) {
+    let (w, h) = (p.width, p.height);
+    let Some(alpha) = &p.alpha else { return };
+    let weight = box_blur(alpha, w, h, FILL_RADIUS);
+    for plane in &mut p.channels {
+        let spread = box_blur(plane, w, h, FILL_RADIUS);
+        plane
+            .par_iter_mut()
+            .zip(alpha.par_iter())
+            .zip(spread.par_iter().zip(&weight))
+            .for_each(|((c, a), (s, wt))| {
+                *c = if *a > 0.0 {
+                    *c / a
+                } else if *wt > 1e-6 {
+                    s / wt
+                } else {
+                    0.0
+                };
+            });
+    }
 }

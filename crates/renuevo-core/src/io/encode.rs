@@ -55,13 +55,35 @@ impl OutputFormat {
         }
     }
 
-    /// Formato recomendado para guardar exactamente este tipo de píxel.
-    pub fn suggestion_for(color: ColorType) -> &'static str {
-        if Self::Png.can_store(color) {
-            "PNG o TIFF"
-        } else {
-            "TIFF"
+    /// Formatos que sí pueden guardar exactamente este tipo de píxel, sin contar `self`
+    /// (p. ej. «PNG o TIFF»).
+    pub fn alternatives_for(self, color: ColorType) -> String {
+        let names: Vec<_> = Self::ALL
+            .into_iter()
+            .filter(|&f| f != self && f.can_store(color))
+            .map(|f| f.extension().to_uppercase())
+            .collect();
+        names.join(" o ")
+    }
+
+    /// Lado máximo en píxeles que admite el formato (WebP guarda el tamaño en 14 bits).
+    pub fn max_side(self) -> Option<u32> {
+        match self {
+            Self::WebP => Some(16_383),
+            Self::Png | Self::Tiff => None,
         }
+    }
+
+    /// Motivo por el que el formato no puede guardar una imagen de `width`×`height`, si lo hay.
+    pub fn size_problem(self, width: u32, height: u32) -> Option<String> {
+        let max = self.max_side()?;
+        (width.max(height) > max).then(|| {
+            format!(
+                "{} admite como máximo {max} px por lado y la imagen mide {width}×{height}: usa {}",
+                self.extension().to_uppercase(),
+                self.alternatives_for(ColorType::Rgba8)
+            )
+        })
     }
 }
 
@@ -93,8 +115,11 @@ pub fn encode(
         return Err(Error::Unsupported(format!(
             "{} no puede guardar píxeles {color:?} sin pérdida; usa {}",
             options.format.extension().to_uppercase(),
-            OutputFormat::suggestion_for(color)
+            options.format.alternatives_for(color)
         )));
+    }
+    if let Some(problem) = options.format.size_problem(image.width(), image.height()) {
+        return Err(Error::Unsupported(problem));
     }
 
     // Solo DPI con sentido (los campos de `Dpi` son públicos y podrían traer NaN o negativos).
@@ -261,10 +286,13 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     };
-    let mut tmp = tempfile::Builder::new()
-        .prefix(".renuevo-")
-        .suffix(".tmp")
-        .tempfile_in(dir)?;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".renuevo-").suffix(".tmp");
+    // Permisos de un archivo normal (0666 menos la umask, normalmente 0644): el temporal se
+    // crearía con 0600 y el archivo final lo heredaría.
+    #[cfg(unix)]
+    builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o666));
+    let mut tmp = builder.tempfile_in(dir)?;
     tmp.write_all(bytes)?;
     tmp.as_file().sync_all()?;
     tmp.persist(path).map_err(|e| Error::Io(e.error))?;

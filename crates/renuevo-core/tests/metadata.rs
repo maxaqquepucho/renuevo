@@ -809,3 +809,306 @@ fn heic_quarter_turn_swaps_dpi() {
         assert_eq!((dpi.x, dpi.y), expected, "giro {degrees}");
     }
 }
+
+// ---- Tercera revisión: fotos reales ----
+
+/// Inserta un chunk de PNG justo después de `IHDR`.
+fn png_insert_after_ihdr(png: &[u8], kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let ihdr_end = 8 + 8 + 13 + 4;
+    let mut chunk = (data.len() as u32).to_be_bytes().to_vec();
+    chunk.extend_from_slice(kind);
+    chunk.extend_from_slice(data);
+    chunk.extend_from_slice(&crc32fast::hash(&chunk[4..]).to_be_bytes());
+    [&png[..ihdr_end], &chunk, &png[ihdr_end..]].concat()
+}
+
+/// Como en macOS y en la especificación PNG, `cICP` manda sobre `iCCP`: un PNG HDR (PQ) con
+/// los dos salía casi negro al usar el ICC.
+#[test]
+fn png_cicp_wins_over_iccp() {
+    let p3 = ColorProfile::new_display_p3().encode().unwrap();
+    let mut png = Vec::new();
+    let mut encoder = image::codecs::png::PngEncoder::new(&mut png);
+    image::ImageEncoder::set_icc_profile(&mut encoder, p3).unwrap();
+    common::rgb8(2, 1).write_with_encoder(encoder).unwrap();
+
+    let srgb = decode_bytes(&png_insert_after_ihdr(&png, b"cICP", &[1, 13, 0, 1])).unwrap();
+    assert_eq!(srgb.icc, None);
+    assert!(srgb.info.notes.iter().any(|n| n.contains("manda cICP")));
+
+    let pq = decode_bytes(&png_insert_after_ihdr(&png, b"cICP", &[9, 16, 0, 1])).unwrap();
+    assert!(
+        matches!(&pq.info.color, ColorSpaceInfo::Nclx { description } if description.contains("PQ")),
+        "{:?}",
+        pq.info.color
+    );
+    // Un cICP que no se puede convertir no tumba el ICC.
+    let odd = decode_bytes(&png_insert_after_ihdr(&png, b"cICP", &[2, 2, 0, 1])).unwrap();
+    assert!(
+        matches!(odd.info.color, ColorSpaceInfo::Icc { .. }),
+        "{:?}",
+        odd.info.color
+    );
+}
+
+/// Los perfiles que sintetiza la app llevaban la hora del procesado: dos exportaciones de la
+/// misma foto no eran idénticas.
+#[test]
+fn synthesized_profiles_are_byte_identical_every_time() {
+    use renuevo_core::io::icc;
+    const DATE: [u8; 12] = [0x07, 0xEA, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0];
+    for (p, t) in [(12, 13), (9, 16), (9, 18)] {
+        let profile = icc::from_cicp(p, t).0.unwrap();
+        assert_eq!(profile[24..36], DATE, "cICP {p}/{t}");
+    }
+    let gamma = png_with_chunks(false, 1.0, None);
+    let a = decode_bytes(&gamma).unwrap().icc.unwrap();
+    let b = decode_bytes(&gamma).unwrap().icc.unwrap();
+    assert_eq!(a, b);
+    assert_eq!(a[24..36], DATE);
+}
+
+fn jpeg_with_app1(app1: &[u8]) -> Vec<u8> {
+    let mut jpeg = Vec::new();
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new(&mut jpeg);
+    encoder.set_pixel_density(image::codecs::jpeg::PixelDensity::dpi(72));
+    common::rgb8(16, 16).write_with_encoder(encoder).unwrap();
+    let mut segment = vec![0xFF, 0xE1];
+    segment.extend_from_slice(&((app1.len() + 2) as u16).to_be_bytes());
+    segment.extend_from_slice(app1);
+    [&jpeg[..2], &segment, &jpeg[2..]].concat()
+}
+
+/// Un puntero roto a la sub-IFD de EXIF hacía perder todo el EXIF, también los DPI de la IFD
+/// principal (macOS sí los lee).
+#[test]
+fn exif_dpi_survives_a_broken_pointer() {
+    let mut tiff = b"II*\0\x08\0\0\0".to_vec();
+    tiff.extend_from_slice(&4u16.to_le_bytes());
+    let entry = |tag: u16, kind: u16, value: u32| {
+        [
+            &tag.to_le_bytes()[..],
+            &kind.to_le_bytes(),
+            &1u32.to_le_bytes(),
+            &value.to_le_bytes(),
+        ]
+        .concat()
+    };
+    tiff.extend(entry(0x011A, 5, 62));
+    tiff.extend(entry(0x011B, 5, 70));
+    tiff.extend(entry(0x0128, 3, 2));
+    tiff.extend(entry(0x8769, 4, 0xFFFF_FF00)); // ExifIFD fuera del bloque
+    tiff.extend_from_slice(&0u32.to_le_bytes());
+    for _ in 0..2 {
+        tiff.extend_from_slice(&300u32.to_le_bytes());
+        tiff.extend_from_slice(&1u32.to_le_bytes());
+    }
+    let jpeg = jpeg_with_app1(&[b"Exif\0\0".as_slice(), &tiff].concat());
+    let photo = decode_bytes(&jpeg).unwrap();
+    assert!(photo.info.had_exif);
+    assert_eq!(photo.info.dpi, Dpi::new(300.0, 300.0));
+}
+
+/// Lightroom guarda la resolución en XMP; macOS la usa antes que la de JFIF.
+#[test]
+fn xmp_resolution_is_used_without_exif() {
+    let xmp = br#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:tiff="http://ns.adobe.com/tiff/1.0/" tiff:XResolution="2400000/10000" tiff:YResolution="2400000/10000" tiff:ResolutionUnit="2"/></rdf:RDF></x:xmpmeta>"#;
+    let jpeg = jpeg_with_app1(&[b"http://ns.adobe.com/xap/1.0/\0".as_slice(), xmp].concat());
+    assert_eq!(
+        decode_bytes(&jpeg).unwrap().info.dpi,
+        Dpi::new(240.0, 240.0)
+    );
+}
+
+#[test]
+fn bigtiff_is_recognised() {
+    let image = common::rgb8(16, 8);
+    let mut buf = Cursor::new(Vec::new());
+    TiffEncoder::new_big(&mut buf)
+        .unwrap()
+        .write_image::<colortype::RGB8>(16, 8, image.as_bytes())
+        .unwrap();
+    let photo = decode_bytes(buf.get_ref()).unwrap();
+    assert_eq!(photo.image, image);
+}
+
+/// Un archivo cortado daba mensajes de la librería en inglés («failed to fill whole buffer»).
+#[test]
+fn damaged_files_are_explained_in_spanish() {
+    let mut png = Vec::new();
+    common::rgb8(64, 64)
+        .write_with_encoder(image::codecs::png::PngEncoder::new(&mut png))
+        .unwrap();
+    let err = decode_bytes(&png[..png.len() / 2]).unwrap_err().to_string();
+    assert!(err.contains("dañado o incompleto"), "{err}");
+}
+
+/// WebP guarda el tamaño en 14 bits: antes fallaba al final, con un error críptico.
+#[test]
+fn webp_size_limit_and_format_suggestions() {
+    use image::ColorType;
+    let wide = DynamicImage::new_rgb8(16_384, 1);
+    let err = encode(&wide, None, &opts(OutputFormat::WebP, None))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("16383"), "{err}");
+    assert!(OutputFormat::WebP.size_problem(16_383, 100).is_none());
+    // Solo se sugieren formatos que sí pueden guardar esos píxeles, y nunca el actual.
+    assert_eq!(OutputFormat::Tiff.alternatives_for(ColorType::La8), "PNG");
+    assert_eq!(
+        OutputFormat::WebP.alternatives_for(ColorType::L16),
+        "PNG o TIFF"
+    );
+}
+
+/// El temporal se crea con 0600 y el archivo final lo heredaba.
+#[cfg(unix)]
+#[test]
+fn exported_files_get_normal_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let reference = dir.path().join("referencia");
+    std::fs::write(&reference, b"x").unwrap();
+    let out = dir.path().join("copia.png");
+    export(
+        &common::rgb8(8, 8),
+        None,
+        &out,
+        &opts(OutputFormat::Png, None),
+    )
+    .unwrap();
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&out), mode(&reference));
+}
+
+#[test]
+fn cancelled_batch_item_is_reported_as_cancelled() {
+    use renuevo_core::batch::{BatchJob, ItemStatus, run_batch};
+    use renuevo_core::upscale::UpscaleParams;
+    use renuevo_core::{PipelineConfig, Progress};
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("a.png");
+    common::rgb8(64, 64).save(&input).unwrap();
+    let job = BatchJob {
+        inputs: vec![input],
+        output_dir: dir.path().join("out"),
+        suffix: "_r".to_owned(),
+        skip_existing: false,
+        pipeline: PipelineConfig {
+            upscale: Some(UpscaleParams::default()),
+            ..PipelineConfig::exact_copy()
+        },
+        encode: opts(OutputFormat::Png, None),
+    };
+    std::fs::create_dir_all(&job.output_dir).unwrap();
+    let progress = Progress::new();
+    let mut statuses = Vec::new();
+    let summary = run_batch(&job, &progress, |i, status| {
+        if status == ItemStatus::Running {
+            progress.cancel();
+        }
+        statuses.push((i, status));
+    });
+    assert!(summary.cancelled);
+    assert_eq!(summary.failed, 0);
+    assert!(
+        statuses.contains(&(0, ItemStatus::Cancelled)),
+        "{statuses:?}"
+    );
+}
+
+/// HEIC de una foto con 4 teselas, desde un PNG.
+#[cfg(feature = "heic")]
+fn heif_enc(dir: &Path, name: &str, args: &[&str]) -> Option<Vec<u8>> {
+    let heif_enc = tool("heif-enc")?;
+    let png = dir.join(format!("{name}.png"));
+    common::rgb8(128, 128).save(&png).unwrap();
+    let out = dir.join(format!("{name}.heic"));
+    run(Command::new(heif_enc)
+        .args(args)
+        .arg("-o")
+        .arg(&out)
+        .arg(&png));
+    Some(std::fs::read(out).unwrap())
+}
+
+/// libheif rellena en verde, sin dar error, lo que falta de un HEIC cortado: ahora se avisa.
+#[cfg(feature = "heic")]
+#[test]
+fn truncated_heic_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(heic) = heif_enc(dir.path(), "t", &["-q", "90", "--cut-tiles", "32"]) else {
+        eprintln!("heif-enc no disponible: se omite");
+        return;
+    };
+    assert!(decode_bytes(&heic).unwrap().info.notes.is_empty());
+    let cut = decode_bytes(&heic[..heic.len() * 6 / 10]).unwrap();
+    assert!(
+        cut.info
+            .notes
+            .iter()
+            .any(|n| n.contains("dañado o incompleto")),
+        "{:?}",
+        cut.info.notes
+    );
+}
+
+/// Un HEIF que solo tiene secuencia (sin imagen principal) no abría; macOS sí lo abre.
+#[cfg(feature = "heic")]
+#[test]
+fn heif_sequence_without_primary_image_opens_its_first_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(mut heics) = heif_enc(dir.path(), "s", &["-S"]) else {
+        eprintln!("heif-enc no disponible: se omite");
+        return;
+    };
+    // Se quita la caja `meta` (la de la imagen fija) renombrándola a `free`.
+    let mut at = 0;
+    while at + 8 <= heics.len() {
+        let size = u32::from_be_bytes(heics[at..at + 4].try_into().unwrap()) as usize;
+        if &heics[at + 4..at + 8] == b"meta" {
+            heics[at + 4..at + 8].copy_from_slice(b"free");
+        }
+        at += size.max(8);
+    }
+    let photo = decode_bytes(&heics).unwrap();
+    assert_eq!((photo.image.width(), photo.image.height()), (128, 128));
+    assert!(photo.info.notes.iter().any(|n| n.contains("secuencia")));
+}
+
+/// macOS muestra con la curva sRGB los HEIC cuyo NCLX declara una curva de vídeo.
+#[cfg(feature = "heic")]
+#[test]
+fn heic_video_transfer_is_shown_as_srgb() {
+    let dir = tempfile::tempdir().unwrap();
+    let nclx = |name: &str, primaries: &str| {
+        heif_enc(
+            dir.path(),
+            name,
+            &[
+                "-q",
+                "95",
+                "--colour_primaries",
+                primaries,
+                "--transfer_characteristic",
+                "1",
+                "--matrix_coefficients",
+                "6",
+                "--full_range_flag",
+                "1",
+            ],
+        )
+    };
+    let Some(bt709) = nclx("bt709", "1") else {
+        eprintln!("heif-enc no disponible: se omite");
+        return;
+    };
+    let photo = decode_bytes(&bt709).unwrap();
+    assert_eq!(photo.icc, None, "{:?}", photo.info.color);
+    let p3 = decode_bytes(&nclx("p3", "12").unwrap()).unwrap();
+    assert!(
+        matches!(&p3.info.color, ColorSpaceInfo::Nclx { description } if description == "Display P3"),
+        "{:?}",
+        p3.info.color
+    );
+}

@@ -3394,6 +3394,7 @@ dependencies = [
  "fast_image_resize",
  "image",
  "moxcms 0.9.2",
+ "rayon",
  "renuevo-core",
  "rfd",
  "tempfile",

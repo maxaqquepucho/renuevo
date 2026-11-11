@@ -12,19 +12,27 @@ quiere, **restaurarlas** (ruido, bloques JPEG) y **ampliarlas** con algoritmos c
 | **Ampliar** | ×1,5 / ×2 / ×3 / ×4 con Lanczos3 o EASU («bordes nítidos») + RCAS | Salida en 16 bits para no crear bandas |
 
 - **Formatos de entrada**: JPEG, PNG, WebP, TIFF y **HEIC** (iPhone), incluido HEIC de 10 bits sin truncar.
-- **Metadatos**: se **conserva el perfil de color** (ICC, o NCLX de HEIC convertido a ICC: Display P3 sigue
-  siendo Display P3) y se **elimina el EXIF** (GPS, cámara, fecha). La orientación del EXIF se aplica a
-  los píxeles antes de quitarlo, para que la foto no salga girada. Los **DPI** se conservan en PNG y TIFF
-  (al ampliar ×2 se duplican, para mantener el tamaño de impresión).
-- **Color que no es ICC**: `gAMA`/`cHRM`/`cICP` de PNG se convierten en un ICC equivalente. Los JPEG/TIFF
+- **Metadatos**: la copia es un archivo nuevo que lleva solo los píxeles, el **perfil de color** (ICC, o
+  NCLX de HEIC convertido a ICC: Display P3 sigue siendo Display P3) y los **DPI** (en PNG y TIFF; al
+  ampliar ×2 se duplican, para mantener el tamaño de impresión). Todo lo demás se **elimina**: EXIF
+  (GPS, cámara, fecha), XMP, IPTC, Content Credentials (C2PA), textos de PNG (como el prompt de una
+  imagen generada con IA), miniaturas y MakerNotes. Eso incluye la etiqueta de «generada con IA» que
+  llevan C2PA o XMP. La orientación del EXIF se aplica a los píxeles antes de quitarlo, para que la foto
+  no salga girada. Los perfiles que sintetiza la app llevan siempre la misma fecha, así que exportar
+  dos veces la misma foto da archivos idénticos byte a byte.
+- **Color que no es ICC**: `gAMA`/`cHRM`/`cICP` de PNG se convierten en un ICC equivalente (`cICP` manda
+  sobre `iCCP`, como en macOS y en la especificación PNG). En HEIC, un NCLX con curva de vídeo
+  (BT.709/BT.601) se trata como sRGB, que es como lo muestra macOS. Los JPEG/TIFF
   **CMYK** se convierten con su propio perfil (y la intención que declara, como ColorSync) a ProPhoto
   RGB en 16 bits, cuya gama contiene toda la de imprenta (PNG/TIFF/WebP no guardan CMYK): se ven igual
   que en macOS (diferencia media 1/255). El alfa premultiplicado (TIFF/HEIC) se pasa a alfa normal.
 - **Lotes**: aplica los ajustes a toda una carpeta, de una en una. Nunca sobrescribe un original:
   ninguna salida puede ser (por inodo) una foto de entrada, y `a.jpg` + `a.png` dan
   `a_jpg_renuevo.png` y `a_png_renuevo.png` en lugar de pisarse.
-- **Visor**: comparador antes/después con divisor, zoom, vista 1:1 y gestión de color en pantalla. Con
-  zoom, los cambios de ajustes se previsualizan solos en la zona visible.
+- **Visor**: comparador antes/después con divisor, zoom, vista 1:1 y gestión de color en pantalla (en
+  16 bits, con la intención que declara el perfil, también para perfiles de gris). Las fotos HDR (PQ/HLG)
+  se muestran con un mapeo de tonos parecido al de macOS en una pantalla normal. Con zoom, los cambios
+  de ajustes se previsualizan solos en la zona visible.
 
 > Ningún algoritmo recupera información que ya se perdió. La copia exacta garantiza que **no se pierde
 > nada más**; restaurar y ampliar mejoran lo que se ve, pero no inventan detalle real.
@@ -86,12 +94,15 @@ La app avisa en el panel de la foto de todo lo que no puede copiar:
 - **HDR**: los mapas de ganancia de las fotos HDR del iPhone (y Ultra HDR / ISO 21496) no caben en
   PNG/TIFF/WebP: se copia la foto normal (SDR) y se avisa.
 - **Varias imágenes**: de un TIFF de varias páginas, un PNG/WebP animado o un HEIF con varias imágenes
-  solo se copia la primera (o la principal), y se avisa.
-- **WebP** no guarda DPI.
+  o con secuencia solo se copia la primera (o la principal), y se avisa.
+- **WebP** no guarda DPI y admite como máximo 16383 px por lado (se avisa antes de procesar).
+- Lo que va **dentro de los propios píxeles** (marcas de agua invisibles, datos escondidos en el alfa)
+  se conserva: la copia exacta no cambia ningún píxel.
 - **TIFF poco habituales** que no se pueden abrir (con un error claro, nunca con colores erróneos): gris
-  con alfa, CMYK con canal alfa y CMYK en planos separados. Tampoco los JPEG CMYK con la K a más
-  resolución que C, M y Y (el decodificador los leería mal).
-- Un **JPEG cortado** se abre con la parte que falta en gris, y se avisa.
+  con alfa, CMYK con canal alfa, CMYK en planos separados, YCbCr (con submuestreo o JPEG dentro) y Lab.
+  Tampoco los JPEG CMYK con la K a más resolución que C, M y Y (el decodificador los leería mal).
+- Un **JPEG o HEIC cortado o dañado** se abre igual, con la parte que falta en gris, verde o un color
+  plano, y se avisa.
 
 ## Licencias
 

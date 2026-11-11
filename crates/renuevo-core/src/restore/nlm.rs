@@ -84,14 +84,7 @@ pub fn nlm(
                     }
                     // 2) Suma horizontal de ventana (2p+1).
                     for r in 0..ext_rows {
-                        let row = &diff[r * w..(r + 1) * w];
-                        let out_row = &mut hsum[r * w..(r + 1) * w];
-                        let mut acc: f32 = (-pi..=pi).map(|k| row[clamp_index(k, w)]).sum();
-                        for x in 0..w {
-                            out_row[x] = acc;
-                            acc += row[clamp_index(x as isize + pi + 1, w)]
-                                - row[clamp_index(x as isize - pi, w)];
-                        }
+                        window_sum(&diff[r * w..(r + 1) * w], &mut hsum[r * w..(r + 1) * w], p);
                     }
                     // 3) Suma vertical, peso y acumulación.
                     for r in 0..rows {
@@ -128,9 +121,51 @@ pub fn nlm(
     Ok(out)
 }
 
+/// `out[x]` = suma de `row[x−p..=x+p]` (bordes replicados), siempre en el mismo orden: no
+/// depende de dónde empieza la fila (una zona recortada da lo mismo que la foto completa) y,
+/// sin acumulador deslizante, el interior se vectoriza.
+fn window_sum(row: &[f32], out: &mut [f32], p: usize) {
+    let w = row.len();
+    let at =
+        |x: usize| (-(p as isize)..=p as isize).map(move |k| row[clamp_index(x as isize + k, w)]);
+    let edge = |x: usize| at(x).fold(0.0f32, |acc, v| acc + v);
+    if w <= 2 * p {
+        for (x, o) in out.iter_mut().enumerate() {
+            *o = edge(x);
+        }
+        return;
+    }
+    let inner = w - 2 * p;
+    out[p..p + inner].copy_from_slice(&row[..inner]);
+    for k in 1..=2 * p {
+        for (o, v) in out[p..p + inner].iter_mut().zip(&row[k..k + inner]) {
+            *o += v;
+        }
+    }
+    for x in (0..p).chain(w - p..w) {
+        out[x] = edge(x);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::exp_neg;
+    use super::*;
+
+    #[test]
+    fn window_sum_is_the_same_on_any_crop() {
+        let row: Vec<f32> = (0..97).map(|i| ((i * 7919) % 101) as f32 / 101.0).collect();
+        let mut full = vec![0.0; row.len()];
+        window_sum(&row, &mut full, 2);
+        for start in [3, 10, 41] {
+            let mut part = vec![0.0; row.len() - start];
+            window_sum(&row[start..], &mut part, 2);
+            // Lejos del borde del recorte, exactamente lo mismo.
+            assert_eq!(part[2..], full[start + 2..]);
+        }
+        let mut tiny = vec![0.0; 3];
+        window_sum(&row[..3], &mut tiny, 2);
+        assert!((tiny[1] - (row[0] * 2.0 + row[1] + row[2] * 2.0)).abs() < 1e-6);
+    }
 
     #[test]
     fn exp_neg_is_close_to_libm() {

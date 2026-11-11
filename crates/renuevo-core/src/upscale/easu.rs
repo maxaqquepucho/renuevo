@@ -11,7 +11,7 @@
 use rayon::prelude::*;
 
 use crate::filters::clamp_index;
-use crate::planar::Planar;
+use crate::planar::{Planar, rows_mut};
 use crate::{Progress, Result};
 
 /// Posiciones de los 12 taps relativas a la esquina superior izquierda del cuadrado 2×2:
@@ -76,52 +76,78 @@ fn accumulate(dir: &mut (f32, f32), len: &mut f32, w: f32, [la, lb, lc, ld, le]:
 /// Una pasada de EASU de `src` a `nw`×`nh` (pensada para factores ≤ 2).
 /// `scale` = píxeles de entrada por píxel de salida (1/factor exacto, no el cociente de tamaños
 /// redondeados: así una zona recortada cae exactamente sobre la misma rejilla que la foto).
+///
+/// Todos los planos (también el alfa) se filtran con los mismos pesos, calculados sobre la
+/// luminancia del color.
+///
+/// Si `src` es un recorte de una imagen mayor, `origin` = ((x, y) del recorte en la entrada
+/// completa, (x, y) de su resultado en la salida completa): las posiciones se calculan en
+/// coordenadas de la imagen completa y el recorte da exactamente los mismos valores.
 pub fn easu_pass(
     src: &Planar,
     nw: usize,
     nh: usize,
     scale: f32,
+    origin: ((usize, usize), (usize, usize)),
     progress: &Progress,
 ) -> Result<Planar> {
+    let ((in_x, in_y), (out_x, out_y)) = origin;
     let (w, h) = (src.width, src.height);
-    let [r, g, b] = &src.channels;
-    // Luma aproximada de FSR (rango 0..2), solo para analizar bordes.
-    let luma: Vec<f32> = r
-        .par_iter()
-        .zip(g.par_iter().zip(b))
-        .map(|(r, (g, b))| 0.5 * r + g + 0.5 * b)
+    // Luma aproximada de FSR (rango 0..2), solo para analizar bordes. En gris es 2·v: se lee
+    // del propio plano sin copiarlo.
+    let computed: Vec<f32>;
+    let (luma, luma_scale): (&[f32], f32) = match &src.channels[..] {
+        [r, g, b] => {
+            computed = r
+                .par_iter()
+                .zip(g.par_iter().zip(b))
+                .map(|(r, (g, b))| 0.5 * r + g + 0.5 * b)
+                .collect();
+            (&computed, 1.0)
+        }
+        planes => (&planes[0], 2.0),
+    };
+    let planes: Vec<&[f32]> = src
+        .channels
+        .iter()
+        .chain(src.alpha.as_ref())
+        .map(Vec::as_slice)
         .collect();
 
     let (scale_x, scale_y) = (scale, scale);
     let off_x = 0.5 * scale_x - 0.5;
     let off_y = 0.5 * scale_y - 0.5;
 
-    let mut out = Planar::new(nw, nh, src.gray, false);
-    let [or, og, ob] = &mut out.channels;
-    or.par_chunks_mut(nw)
-        .zip(og.par_chunks_mut(nw))
-        .zip(ob.par_chunks_mut(nw))
+    let mut out = Planar::new(nw, nh, src.is_gray(), src.alpha.is_some());
+    out.premultiplied = src.premultiplied;
+    let out_planes = out
+        .channels
+        .iter_mut()
+        .chain(out.alpha.as_mut())
+        .map(Vec::as_mut_slice);
+    rows_mut(out_planes, nw, nh)
+        .into_par_iter()
         .enumerate()
-        .try_for_each(|(oy, ((row_r, row_g), row_b))| -> Result<()> {
+        .try_for_each(|(oy, mut rows)| -> Result<()> {
             if oy % 64 == 0 {
                 progress.check()?;
             }
-            let py = oy as f32 * scale_y + off_y;
+            let py = (out_y + oy) as f32 * scale_y + off_y;
             let fy = py.floor();
             let ty = py - fy;
-            let fy = fy as isize;
+            let fy = fy as isize - in_y as isize;
             for ox in 0..nw {
-                let px = ox as f32 * scale_x + off_x;
+                let px = (out_x + ox) as f32 * scale_x + off_x;
                 let fx = px.floor();
                 let tx = px - fx;
-                let fx = fx as isize;
+                let fx = fx as isize - in_x as isize;
 
                 let mut idx = [0usize; 12];
                 let mut l = [0.0f32; 12];
                 for (t, (dx, dy)) in TAPS.iter().enumerate() {
                     let i = clamp_index(fy + dy, h) * w + clamp_index(fx + dx, w);
                     idx[t] = i;
-                    l[t] = luma[i];
+                    l[t] = luma[i] * luma_scale;
                 }
 
                 // Dirección y longitud del borde, ponderadas bilinealmente en el cuadrado 2×2.
@@ -165,7 +191,8 @@ pub fn easu_pass(
                 let lob = 0.5 + ((1.0 / 4.0 - 0.04) - 0.5) * len;
                 let clp = lob.recip();
 
-                let (mut acc_r, mut acc_g, mut acc_b, mut acc_w) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+                let mut weights = [0.0f32; 12];
+                let mut acc_w = 0.0f32;
                 for (t, (tx_off, ty_off)) in TAPS.iter().enumerate() {
                     let ox_ = *tx_off as f32 - tx;
                     let oy_ = *ty_off as f32 - ty;
@@ -178,10 +205,7 @@ pub fn easu_pass(
                     let wb = 2.0 / 5.0 * d2 - 1.0;
                     let wa = lob * d2 - 1.0;
                     let wt = (25.0 / 16.0 * wb * wb - (25.0 / 16.0 - 1.0)) * (wa * wa);
-                    let i = idx[t];
-                    acc_r += r[i] * wt;
-                    acc_g += g[i] * wt;
-                    acc_b += b[i] * wt;
+                    weights[t] = wt;
                     acc_w += wt;
                 }
                 let inv_w = if acc_w.abs() > 1e-12 {
@@ -191,21 +215,22 @@ pub fn easu_pass(
                 };
                 // Anti-halo: limitar al rango de los 4 vecinos más cercanos.
                 let near = [idx[F], idx[G], idx[J], idx[K]];
-                let clamp4 = |plane: &[f32], v: f32| {
+                for (plane, row) in planes.iter().zip(rows.iter_mut()) {
+                    if inv_w == 0.0 {
+                        row[ox] = plane[idx[F]];
+                        continue;
+                    }
+                    let mut acc = 0.0f32;
+                    for (&i, wt) in idx.iter().zip(weights) {
+                        acc += plane[i] * wt;
+                    }
                     let (mut mn, mut mx) = (f32::INFINITY, f32::NEG_INFINITY);
                     for &i in &near {
                         mn = mn.min(plane[i]);
                         mx = mx.max(plane[i]);
                     }
-                    if inv_w == 0.0 {
-                        plane[idx[F]]
-                    } else {
-                        v.max(mn).min(mx)
-                    }
-                };
-                row_r[ox] = clamp4(r, acc_r * inv_w);
-                row_g[ox] = clamp4(g, acc_g * inv_w);
-                row_b[ox] = clamp4(b, acc_b * inv_w);
+                    row[ox] = (acc * inv_w).max(mn).min(mx);
+                }
             }
             progress.advance(1);
             Ok(())

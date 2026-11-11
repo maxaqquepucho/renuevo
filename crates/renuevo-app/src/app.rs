@@ -304,6 +304,11 @@ impl RenuevoApp {
             return;
         }
         let config = self.config();
+        let (w, h) = config.output_size(state.photo.image.width(), state.photo.image.height());
+        if let Some(problem) = self.settings.encode.format.size_problem(w, h) {
+            self.error(&problem);
+            return;
+        }
         let encode = renuevo_core::io::EncodeOptions {
             dpi: config.output_dpi(state.photo.info.dpi),
             ..self.settings.encode

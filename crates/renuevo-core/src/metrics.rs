@@ -14,10 +14,10 @@ pub fn psnr(a: &DynamicImage, b: &DynamicImage) -> f64 {
         "tamaños distintos"
     );
     let mut sum = 0.0f64;
-    for c in 0..3 {
-        sum += pa.channels[c]
+    for (ca, cb) in pa.rgb().iter().zip(pb.rgb()) {
+        sum += ca
             .iter()
-            .zip(&pb.channels[c])
+            .zip(cb)
             .map(|(x, y)| f64::from(x - y).powi(2))
             .sum::<f64>();
     }
@@ -78,7 +78,7 @@ pub fn ssim(a: &DynamicImage, b: &DynamicImage) -> f64 {
 }
 
 fn luma_plane(p: &Planar) -> Vec<f32> {
-    let [r, g, b] = &p.channels;
+    let [r, g, b] = p.rgb();
     r.iter()
         .zip(g)
         .zip(b)

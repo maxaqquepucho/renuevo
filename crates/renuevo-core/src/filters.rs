@@ -11,11 +11,14 @@ pub(crate) fn clamp_index(i: isize, len: usize) -> usize {
 }
 
 /// Media en una ventana (2r+1)×(2r+1). Coste O(1) por píxel gracias a sumas deslizantes.
+///
+/// Las sumas se llevan en `f64`: la de unos pocos valores `f32` es exacta, así el resultado no
+/// depende de dónde empieza la fila o la banda (una zona recortada da lo mismo que la foto).
 pub fn box_blur(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
     if r == 0 || w == 0 || h == 0 {
         return src.to_vec();
     }
-    let norm = 1.0 / (2 * r + 1) as f32;
+    let norm = 1.0 / (2 * r + 1) as f64;
 
     // Pasada horizontal: cada fila es independiente.
     let mut horiz = vec![0.0f32; w * h];
@@ -24,12 +27,12 @@ pub fn box_blur(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
         .zip(src.par_chunks(w))
         .for_each(|(dst, row)| {
             let ri = r as isize;
-            let mut acc: f32 = (-ri..=ri).map(|k| row[clamp_index(k, w)]).sum();
+            let mut acc: f64 = (-ri..=ri).map(|k| f64::from(row[clamp_index(k, w)])).sum();
             for x in 0..w {
-                dst[x] = acc * norm;
+                dst[x] = (acc * norm) as f32;
                 let add = row[clamp_index(x as isize + ri + 1, w)];
                 let sub = row[clamp_index(x as isize - ri, w)];
-                acc += add - sub;
+                acc += f64::from(add) - f64::from(sub);
             }
         });
 
@@ -41,22 +44,24 @@ pub fn box_blur(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
             let y0 = band * BAND;
             let rows = dst.len() / w;
             let ri = r as isize;
-            let mut acc = vec![0.0f32; w];
+            let mut acc = vec![0.0f64; w];
             for k in -ri..=ri {
                 let row = &horiz[clamp_index(y0 as isize + k, h) * w..][..w];
-                acc.iter_mut().zip(row).for_each(|(a, v)| *a += v);
+                acc.iter_mut()
+                    .zip(row)
+                    .for_each(|(a, v)| *a += f64::from(*v));
             }
             for dy in 0..rows {
                 let y = (y0 + dy) as isize;
                 dst[dy * w..(dy + 1) * w]
                     .iter_mut()
                     .zip(&acc)
-                    .for_each(|(d, a)| *d = a * norm);
+                    .for_each(|(d, a)| *d = (a * norm) as f32);
                 let add = &horiz[clamp_index(y + ri + 1, h) * w..][..w];
                 let sub = &horiz[clamp_index(y - ri, h) * w..][..w];
                 acc.iter_mut()
                     .zip(add.iter().zip(sub))
-                    .for_each(|(a, (p, m))| *a += p - m);
+                    .for_each(|(a, (p, m))| *a += f64::from(*p) - f64::from(*m));
             }
         });
     out
@@ -72,6 +77,7 @@ pub fn gaussian_blur(src: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
     let r = ((n - 1.0) / 2.0).round().max(1.0) as usize;
     let once = box_blur(src, w, h, r);
     let twice = box_blur(&once, w, h, r);
+    drop(once);
     box_blur(&twice, w, h, r)
 }
 

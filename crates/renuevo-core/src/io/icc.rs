@@ -1,12 +1,29 @@
 //! Utilidades de perfiles de color ICC (con `moxcms`).
 
 use moxcms::{
-    Chromaticity, CicpColorPrimaries, CicpProfile, ColorPrimaries, ColorProfile, DataColorSpace,
-    LocalizableString, MatrixCoefficients, ProfileText, TransferCharacteristics, XyY,
-    curve_from_gamma,
+    Chromaticity, CicpColorPrimaries, CicpProfile, ColorDateTime, ColorPrimaries, ColorProfile,
+    DataColorSpace, LocalizableString, MatrixCoefficients, ProfileText, TransferCharacteristics,
+    XyY, curve_from_gamma,
 };
 
 use crate::photo::ColorSpaceInfo;
+
+/// Fecha que llevan los perfiles que sintetiza la app. `moxcms` pondría la hora actual y dos
+/// exportaciones de la misma foto ya no serían idénticas byte a byte.
+const SYNTHESIZED_DATE: ColorDateTime = ColorDateTime {
+    year: 2026,
+    month: 1,
+    day_of_the_month: 1,
+    hours: 0,
+    minutes: 0,
+    seconds: 0,
+};
+
+/// Codifica un perfil sintetizado por la app, siempre con los mismos bytes.
+pub(crate) fn encode(mut profile: ColorProfile) -> Option<Vec<u8>> {
+    profile.creation_date_time = SYNTHESIZED_DATE;
+    profile.encode().ok()
+}
 
 /// Texto legible de un perfil ICC, si lo trae.
 pub fn describe(icc: &[u8]) -> Option<String> {
@@ -86,7 +103,7 @@ pub fn from_cicp(primaries: u8, transfer: u8) -> (Option<Vec<u8>>, ColorSpaceInf
             },
         ),
         CicpColorPrimaries::Smpte432 if srgb_like_transfer => {
-            let icc = ColorProfile::new_display_p3().encode().ok();
+            let icc = encode(ColorProfile::new_display_p3());
             (
                 icc,
                 ColorSpaceInfo::Nclx {
@@ -110,9 +127,9 @@ pub fn from_cicp(primaries: u8, transfer: u8) -> (Option<Vec<u8>>, ColorSpaceInf
             }
             // Sin descripción, las apps que ignoran la etiqueta `cicp` no saben qué es.
             profile.description = Some(text(&label));
-            match profile.encode() {
-                Ok(icc) => (Some(icc), ColorSpaceInfo::Nclx { description: label }),
-                Err(_) => incomplete(),
+            match encode(profile) {
+                Some(icc) => (Some(icc), ColorSpaceInfo::Nclx { description: label }),
+                None => incomplete(),
             }
         }
     }
@@ -234,13 +251,13 @@ pub fn from_png_chunks(
     parts.insert(0, format!("gamma {display_gamma:.2}"));
     let label = format!("PNG con {}", parts.join(" y "));
     profile.description = Some(text(&label));
-    match profile.encode() {
-        Ok(icc) => (
+    match encode(profile) {
+        Some(icc) => (
             Some(icc),
             ColorSpaceInfo::Converted {
                 description: format!("{label} (gAMA/cHRM convertidos a perfil ICC)"),
             },
         ),
-        Err(_) => invalid("gAMA/cHRM"),
+        None => invalid("gAMA/cHRM"),
     }
 }

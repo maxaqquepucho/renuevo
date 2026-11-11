@@ -4,16 +4,29 @@
 //! escalar (quedarían en 0..1023 dentro de un u16, casi negro) y no expone el perfil de color.
 
 use image::{DynamicImage, ImageBuffer};
-use libheif_rs::{AuxiliaryImagesFilter, ColorSpace, HeifContext, ImageHandle, LibHeif, RgbChroma};
+use libheif_rs::{
+    AuxiliaryImagesFilter, ColorSpace, DecodingOptions, HeifContext, Image, ImageHandle, LibHeif,
+    RgbChroma,
+};
 
 use super::decode::{HDR_NOTE, PREMULTIPLIED_NOTE, is_gray};
 use super::{alpha, heif_boxes, icc, meta};
 use crate::photo::{ColorSpaceInfo, Dpi, Photo, SourceFormat, SourceInfo};
 use crate::{Error, Result};
 
+const DAMAGED_NOTE: &str = "El HEIC está dañado o incompleto (¿archivo cortado?): las partes que \
+     faltan pueden salir en verde";
+
 pub(crate) fn decode(bytes: &[u8]) -> Result<Photo> {
     let ctx = HeifContext::read_from_bytes(bytes)?;
-    let handle = ctx.primary_image_handle()?;
+    let handle = match ctx.primary_image_handle() {
+        Ok(handle) => handle,
+        // Un HEIF de secuencia (.heics) puede no tener imagen fija: como macOS, se abre el
+        // primer fotograma.
+        Err(_) if ctx.has_sequence() => return decode_sequence(bytes),
+        Err(e) => return Err(e.into()),
+    };
+    let mut notes = Vec::new();
 
     let has_alpha = handle.has_alpha_channel();
     let preferred = handle.preferred_decoding_colorspace().ok();
@@ -34,7 +47,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Photo> {
 
     let raw_icc = handle.color_profile_raw().map(|r| r.data);
     let nclx = handle.color_profile_nclx().map(|n| {
-        (
+        nclx_as_shown(
             n.color_primaries() as u8,
             n.transfer_characteristics() as u8,
         )
@@ -49,11 +62,13 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Photo> {
         };
 
     let mut image = if monochrome {
-        decode_gray(&handle, has_alpha)?
+        let decoded = decode_checked(&handle, ColorSpace::Monochrome, &mut notes)?;
+        gray_image(&decoded, has_alpha)?
     } else {
-        decode_rgb(&handle, has_alpha, high_bit_depth)?
+        let chroma = rgb_chroma(has_alpha, high_bit_depth);
+        let decoded = decode_checked(&handle, ColorSpace::Rgb(chroma), &mut notes)?;
+        rgb_image(&decoded, has_alpha, high_bit_depth)?
     };
-    let mut notes = Vec::new();
     if has_alpha && handle.is_premultiplied_alpha() {
         alpha::unpremultiply(&mut image);
         notes.push(PREMULTIPLIED_NOTE.to_owned());
@@ -109,7 +124,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Photo> {
             orientation_applied: layout.rotated_or_mirrored(),
             color,
             // Con un giro de 90°/270°, los DPI horizontal y vertical se intercambian.
-            dpi: exif.dpi.map(|d| {
+            dpi: exif.dpi.or_else(|| heif_xmp_dpi(&handle)).map(|d| {
                 if layout.quarter_turn() {
                     Dpi { x: d.y, y: d.x }
                 } else {
@@ -121,15 +136,108 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Photo> {
     })
 }
 
-fn decode_rgb(handle: &ImageHandle, has_alpha: bool, high_bit_depth: bool) -> Result<DynamicImage> {
-    let chroma = match (high_bit_depth, has_alpha) {
+/// Una transferencia de vídeo (BT.709/BT.601/BT.2020) en el NCLX de una foto HEIF la muestra
+/// macOS con la curva sRGB, igual que hace al revés al guardar: se trata igual para que la copia
+/// se vea como el original. (En PNG `cICP` macOS sí respeta la curva de vídeo).
+fn nclx_as_shown(primaries: u8, transfer: u8) -> (u8, u8) {
+    match transfer {
+        1 | 6 | 14 | 15 => (primaries, 13),
+        t => (primaries, t),
+    }
+}
+
+/// Decodifica primero en modo estricto: si no, libheif rellena en verde, sin dar error, lo que
+/// falta de un archivo cortado o dañado. Si el modo estricto falla, se decodifica igual y se avisa.
+fn decode_checked(
+    handle: &ImageHandle,
+    color_space: ColorSpace,
+    notes: &mut Vec<String>,
+) -> Result<Image> {
+    let lib = LibHeif::new();
+    let strict = DecodingOptions::new().map(|mut o| {
+        o.set_strict_decoding(true);
+        o
+    });
+    match lib.decode(handle, color_space, strict) {
+        Ok(image) => Ok(image),
+        Err(_) => {
+            let image = lib.decode(handle, color_space, None)?;
+            notes.push(DAMAGED_NOTE.to_owned());
+            Ok(image)
+        }
+    }
+}
+
+/// Primer fotograma de un HEIF que solo tiene secuencia (sin imagen principal).
+fn decode_sequence(bytes: &[u8]) -> Result<Photo> {
+    let no_track = || Error::Unsupported("HEIF de secuencia sin pista de imagen".to_owned());
+    // Primero se mira la profundidad de bits del fotograma tal como se guardó; decodificar
+    // avanza la pista, así que para el definitivo se vuelve a abrir.
+    let probe_ctx = HeifContext::read_from_bytes(bytes)?;
+    let probe = probe_ctx
+        .track(0)
+        .ok_or_else(no_track)?
+        .decode_next_image(ColorSpace::Undefined, None)?;
+    let source_bits = [libheif_rs::Channel::Y, libheif_rs::Channel::Interleaved]
+        .into_iter()
+        .find_map(|c| probe.bits_per_pixel(c))
+        .unwrap_or(8)
+        .max(8);
+    let has_alpha = probe.has_channel(libheif_rs::Channel::Alpha);
+    drop(probe);
+
+    let ctx = HeifContext::read_from_bytes(bytes)?;
+    let track = ctx.track(0).ok_or_else(no_track)?;
+    let high_bit_depth = source_bits > 8;
+    let decoded =
+        track.decode_next_image(ColorSpace::Rgb(rgb_chroma(has_alpha, high_bit_depth)), None)?;
+    let mut image = rgb_image(&decoded, has_alpha, high_bit_depth)?;
+    let mut notes =
+        vec!["HEIF de secuencia (animación): solo se copia el primer fotograma".to_owned()];
+    if has_alpha && decoded.is_premultiplied_alpha() {
+        alpha::unpremultiply(&mut image);
+        notes.push(PREMULTIPLIED_NOTE.to_owned());
+    }
+    let nclx = decoded.color_profile_nclx().map(|n| {
+        nclx_as_shown(
+            n.color_primaries() as u8,
+            n.transfer_characteristics() as u8,
+        )
+    });
+    let (icc, color) = match (decoded.color_profile_raw().map(|r| r.data), nclx) {
+        (Some(raw), _) => icc::resolve(Some(raw), false),
+        (None, Some((p, t))) => icc::from_cicp(p, t),
+        (None, None) => icc::resolve(None, false),
+    };
+    Ok(Photo {
+        image,
+        icc,
+        info: SourceInfo {
+            path: None,
+            format: SourceFormat::Heif,
+            file_size: bytes.len() as u64,
+            bits_per_channel: source_bits,
+            had_exif: false,
+            had_gps: false,
+            orientation_applied: false,
+            color,
+            dpi: None,
+            notes,
+        },
+    })
+}
+
+fn rgb_chroma(has_alpha: bool, high_bit_depth: bool) -> RgbChroma {
+    match (high_bit_depth, has_alpha) {
         (false, false) => RgbChroma::Rgb,
         (false, true) => RgbChroma::Rgba,
         (true, false) => RgbChroma::HdrRgbLe,
         (true, true) => RgbChroma::HdrRgbaLe,
-    };
-    // libheif aplica por defecto las transformaciones del contenedor (irot/imir/clap).
-    let decoded = LibHeif::new().decode(handle, ColorSpace::Rgb(chroma), None)?;
+    }
+}
+
+/// Imagen RGB(A) entrelazada que entrega libheif (ya con giro/espejo/recorte del contenedor).
+fn rgb_image(decoded: &Image, has_alpha: bool, high_bit_depth: bool) -> Result<DynamicImage> {
     let planes = decoded.planes();
     let plane = planes
         .interleaved
@@ -145,8 +253,7 @@ fn decode_rgb(handle: &ImageHandle, has_alpha: bool, high_bit_depth: bool) -> Re
     })
 }
 
-fn decode_gray(handle: &ImageHandle, has_alpha: bool) -> Result<DynamicImage> {
-    let decoded = LibHeif::new().decode(handle, ColorSpace::Monochrome, None)?;
+fn gray_image(decoded: &Image, has_alpha: bool) -> Result<DynamicImage> {
     let planes = decoded.planes();
     let y = planes
         .y
@@ -243,6 +350,16 @@ pub(crate) fn scale_to_16(value: u16, bits: u8) -> u16 {
     let max = (1u32 << bits) - 1;
     let v = u32::from(value).min(max);
     ((v << (16 - bits)) | (v >> (2 * u32::from(bits) - 16))) as u16
+}
+
+/// DPI del XMP de un HEIF (Lightroom los guarda ahí, sin EXIF).
+fn heif_xmp_dpi(handle: &ImageHandle) -> Option<Dpi> {
+    let mut ids = [0; 4];
+    let count = handle.metadata_block_ids(&mut ids, b"mime");
+    ids[..count.min(ids.len())]
+        .iter()
+        .filter(|&&id| handle.metadata_content_type(id) == Some("application/rdf+xml"))
+        .find_map(|&id| meta::xmp_dpi(&handle.metadata(id).ok()?))
 }
 
 /// Bloque EXIF de un HEIF, ya sin el prefijo de 4 bytes con el offset de la cabecera TIFF.

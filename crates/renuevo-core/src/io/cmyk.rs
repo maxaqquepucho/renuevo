@@ -73,9 +73,7 @@ pub(crate) fn convert(
     let image = ImageBuffer::from_raw(width, height, rgb)
         .map(DynamicImage::ImageRgb16)
         .ok_or("tamaño CMYK inesperado")?;
-    let icc = target
-        .encode()
-        .map_err(|e| format!("no se pudo crear el perfil ProPhoto RGB: {e}"))?;
+    let icc = icc::encode(target).ok_or("no se pudo crear el perfil ProPhoto RGB")?;
     let name = icc::describe(profile_bytes).unwrap_or_else(|| "perfil incrustado".to_owned());
     Ok(Converted {
         image,

@@ -23,7 +23,13 @@ pub(crate) fn exif_summary(exif: Option<&[u8]>) -> ExifSummary {
         return ExifSummary::default();
     };
     let tiff = raw.strip_prefix(b"Exif\0\0").unwrap_or(raw);
-    let Ok(parsed) = exif::Reader::new().read_raw(tiff.to_vec()) else {
+    // Tolerante, como macOS: un puntero roto (p. ej. a la sub-IFD de EXIF) no impide leer el
+    // resto, como los DPI de la IFD principal.
+    let parsed = exif::Reader::new()
+        .continue_on_error(true)
+        .read_raw(tiff.to_vec())
+        .or_else(|e| e.distill_partial_result(|_| {}));
+    let Ok(parsed) = parsed else {
         return ExifSummary {
             present: true,
             ..ExifSummary::default()
@@ -63,12 +69,44 @@ fn resolution_to_dpi(x: f64, y: f64, unit: u32) -> Option<Dpi> {
     }
 }
 
+/// DPI de un paquete XMP (`tiff:XResolution`, `tiff:YResolution` y `tiff:ResolutionUnit`, como
+/// atributo o como elemento). Se usa solo si el EXIF no los trae.
+pub(crate) fn xmp_dpi(xmp: &[u8]) -> Option<Dpi> {
+    let text = String::from_utf8_lossy(xmp);
+    let x = xmp_number(&text, "tiff:XResolution")?;
+    let y = xmp_number(&text, "tiff:YResolution").unwrap_or(x);
+    let unit = xmp_number(&text, "tiff:ResolutionUnit").map_or(2, |u| u as u32);
+    resolution_to_dpi(x, y, unit)
+}
+
+/// Valor numérico («300», «3000000/10000») de una propiedad XMP.
+fn xmp_number(text: &str, name: &str) -> Option<f64> {
+    let rest = text[text.find(name)? + name.len()..].trim_start();
+    let (rest, end) = if let Some(r) = rest.strip_prefix('=') {
+        let r = r.trim_start();
+        let quote = r.chars().next().filter(|c| matches!(c, '"' | '\''))?;
+        (&r[1..], quote)
+    } else {
+        (rest.strip_prefix('>')?, '<')
+    };
+    let value = rest.split(end).next()?.trim();
+    let number = match value.split_once('/') {
+        Some((n, d)) => n.trim().parse::<f64>().ok()? / d.trim().parse::<f64>().ok()?,
+        None => value.parse().ok()?,
+    };
+    number.is_finite().then_some(number)
+}
+
 // ---- JPEG ----
+
+const XMP_JPEG_HEADER: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct JpegMeta {
     /// Densidad de la cabecera JFIF (si declara unidades reales).
     pub jfif_dpi: Option<Dpi>,
+    /// Resolución declarada en el XMP (Lightroom la guarda ahí y macOS la usa).
+    pub xmp_dpi: Option<Dpi>,
     /// Posición en el archivo y valor del byte «transform» del segmento APP14 «Adobe».
     pub adobe_transform: Option<(usize, u8)>,
     /// Factores de muestreo (horizontal, vertical) de cada componente del marcador SOF.
@@ -107,6 +145,9 @@ pub(crate) fn jpeg_meta(bytes: &[u8]) -> JpegMeta {
                     2 => Dpi::new(x * 2.54, y * 2.54),
                     _ => None,
                 };
+            }
+            0xE1 if data.starts_with(XMP_JPEG_HEADER) => {
+                meta.xmp_dpi = xmp_dpi(&data[XMP_JPEG_HEADER.len()..]);
             }
             // «Adobe», versión (2), flags0 (2), flags1 (2) y transform (1).
             0xEE if data.starts_with(b"Adobe") && data.len() >= 12 => {

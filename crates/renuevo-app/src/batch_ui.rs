@@ -179,7 +179,13 @@ impl BatchUi {
             });
 
         if let (Some(first), Some(out)) = (self.files.first(), self.output_dir.as_deref()) {
-            let planned = plan_outputs(&self.files, out, &self.suffix, settings.encode.format);
+            // Solo el primero: planificar miles de archivos en cada fotograma se nota.
+            let planned = plan_outputs(
+                std::slice::from_ref(first),
+                out,
+                &self.suffix,
+                settings.encode.format,
+            );
             let example = planned.first().cloned().unwrap_or_else(|| first.clone());
             ui.label(
                 RichText::new(format!("Ejemplo: {}", example.display()))
@@ -243,41 +249,46 @@ impl BatchUi {
         }
 
         ui.separator();
+        // Solo se dibujan las filas visibles: con miles de archivos, dibujarlas todas en cada
+        // fotograma ralentiza la pestaña.
+        let row_height = ui.text_style_height(&egui::TextStyle::Body);
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show_rows(ui, row_height, self.files.len(), |ui, rows| {
                 egui::Grid::new("batch-files")
                     .num_columns(2)
                     .striped(true)
-                    .spacing([16.0, 4.0])
+                    .spacing([16.0, 0.0])
+                    .min_row_height(row_height)
                     .show(ui, |ui| {
-                        for (path, status) in self.files.iter().zip(statuses.iter()) {
+                        let files = self.files.get(rows.clone()).unwrap_or_default();
+                        let states = statuses.get(rows).unwrap_or_default();
+                        for (path, status) in files.iter().zip(states) {
                             ui.label(
                                 path.file_name()
                                     .map(|n| n.to_string_lossy().into_owned())
                                     .unwrap_or_default(),
                             );
-                            let (color, text) = match status {
-                                ItemStatus::Pending => (Color32::GRAY, "pendiente".to_owned()),
-                                ItemStatus::Running => {
-                                    (Color32::from_rgb(120, 170, 255), "procesando…".to_owned())
-                                }
-                                ItemStatus::Done { bytes, .. } => (
-                                    Color32::from_rgb(110, 200, 120),
-                                    format!("verificada · {}", human_bytes(*bytes)),
-                                ),
-                                ItemStatus::Skipped(why) => {
-                                    (Color32::from_rgb(230, 180, 60), format!("omitida: {why}"))
-                                }
-                                ItemStatus::Failed(why) => {
-                                    (Color32::from_rgb(230, 90, 80), format!("error: {why}"))
-                                }
-                            };
+                            let (color, text) = status_label(status);
                             ui.colored_label(color, text);
                             ui.end_row();
                         }
                     });
             });
+    }
+}
+
+fn status_label(status: &ItemStatus) -> (Color32, String) {
+    match status {
+        ItemStatus::Pending => (Color32::GRAY, "pendiente".to_owned()),
+        ItemStatus::Running => (Color32::from_rgb(120, 170, 255), "procesando…".to_owned()),
+        ItemStatus::Done { bytes, .. } => (
+            Color32::from_rgb(110, 200, 120),
+            format!("verificada · {}", human_bytes(*bytes)),
+        ),
+        ItemStatus::Skipped(why) => (Color32::from_rgb(230, 180, 60), format!("omitida: {why}")),
+        ItemStatus::Failed(why) => (Color32::from_rgb(230, 90, 80), format!("error: {why}")),
+        ItemStatus::Cancelled => (Color32::GRAY, "cancelada".to_owned()),
     }
 }
 

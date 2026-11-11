@@ -73,6 +73,10 @@ fn decode_with_image_crate(original: &[u8]) -> Result<Photo> {
     let bytes = patched.as_deref().unwrap_or(original);
 
     let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    // `image` no reconoce la firma de BigTIFF, aunque su decodificador TIFF sí lo lee.
+    if reader.format().is_none() && (bytes.starts_with(b"II+\0") || bytes.starts_with(b"MM\0+")) {
+        reader.set_format(ImageFormat::Tiff);
+    }
     reader.limits(decode_limits());
     let format = match reader.format() {
         Some(ImageFormat::Jpeg) => SourceFormat::Jpeg,
@@ -87,7 +91,9 @@ fn decode_with_image_crate(original: &[u8]) -> Result<Photo> {
         }
     };
 
-    let mut decoder = reader.into_decoder()?;
+    let mut decoder = reader
+        .into_decoder()
+        .map_err(|e| explain_tiff_error(bytes, format, e))?;
     // EXIF primero: JPEG y WebP guardan la orientación al leerlo y no repiten el análisis.
     let exif = decoder.exif_metadata()?;
     let orientation = decoder.orientation()?;
@@ -148,8 +154,10 @@ fn decode_with_image_crate(original: &[u8]) -> Result<Photo> {
                         ),
                     },
                 )
-            } else if icc.is_none() && format == SourceFormat::Png {
-                png_color(bytes, gray)
+            } else if format == SourceFormat::Png {
+                let (icc, color, note) = png_color(bytes, icc, gray);
+                notes.extend(note);
+                (icc, color)
             } else {
                 icc::resolve(icc, gray)
             };
@@ -160,11 +168,11 @@ fn decode_with_image_crate(original: &[u8]) -> Result<Photo> {
     match format {
         SourceFormat::Jpeg => {
             if let Some(j) = &jpeg {
-                dpi = dpi.or(j.jfif_dpi);
+                dpi = dpi.or(j.xmp_dpi).or(j.jfif_dpi);
                 if !j.complete {
                     notes.push(
                         "El JPEG no termina como debe (¿archivo cortado?): la parte que falta \
-                         puede salir gris"
+                         sale en gris o en un color plano"
                             .to_owned(),
                     );
                 }
@@ -242,29 +250,69 @@ pub(crate) const HDR_NOTE: &str = "Foto HDR con mapa de ganancia: se copia la im
 pub(crate) const PREMULTIPLIED_NOTE: &str =
     "Alfa premultiplicado convertido a alfa normal (el que guardan PNG/TIFF/WebP)";
 
-/// Espacio de color de un PNG sin `iCCP`: `cICP` y `gAMA`/`cHRM` se convierten en un ICC
-/// equivalente (nuestro codificador solo escribe `iCCP`), para que los colores no cambien.
-fn png_color(bytes: &[u8], gray: bool) -> (Option<Vec<u8>>, ColorSpaceInfo) {
+/// Espacio de color de un PNG. Como dicen la especificación PNG (3.ª edición) y hace macOS,
+/// `cICP` manda sobre `iCCP`, y este sobre `sRGB` y `gAMA`/`cHRM`. `cICP` y `gAMA`/`cHRM` se
+/// convierten en un ICC equivalente (nuestro codificador solo escribe `iCCP`), para que los
+/// colores no cambien.
+fn png_color(
+    bytes: &[u8],
+    icc: Option<Vec<u8>>,
+    gray: bool,
+) -> (Option<Vec<u8>>, ColorSpaceInfo, Option<String>) {
     let Some(png) = meta::png_meta(bytes) else {
-        return (None, ColorSpaceInfo::AssumedSrgb);
+        let (icc, color) = icc::resolve(icc, gray);
+        return (icc, color, None);
     };
-    if let Some((primaries, transfer)) = png.cicp {
-        let (icc, color) = icc::from_cicp(primaries, transfer);
-        return match icc {
+    // Un cICP con valores «sin especificar» (2) no dice nada: cuenta lo demás.
+    if let Some((primaries, transfer)) = png.cicp.filter(|&(p, t)| p != 2 && t != 2) {
+        match icc::from_cicp(primaries, transfer) {
             // Un ICC sintetizado desde cICP es RGB: no vale para píxeles en gris.
-            Some(_) if gray => (
-                None,
-                ColorSpaceInfo::Discarded {
-                    reason: "cICP en un PNG gris: se asume sRGB".to_owned(),
-                },
-            ),
-            icc => (icc, color),
-        };
+            (Some(_), _) if gray => {
+                if icc.is_none() {
+                    let reason = "cICP en un PNG gris: se asume sRGB".to_owned();
+                    return (None, ColorSpaceInfo::Discarded { reason }, None);
+                }
+            }
+            (cicp_icc, color @ ColorSpaceInfo::Nclx { .. }) => {
+                let note = icc.is_some().then(|| {
+                    "El PNG trae cICP y perfil ICC: manda cICP, como en macOS y en la \
+                     especificación PNG"
+                        .to_owned()
+                });
+                return (cicp_icc, color, note);
+            }
+            // cICP que no se puede convertir: se usa lo demás.
+            _ => {}
+        }
     }
-    if png.srgb {
-        return (None, ColorSpaceInfo::AssumedSrgb);
+    let (icc, color) = if icc.is_some() {
+        icc::resolve(icc, gray)
+    } else if png.srgb {
+        (None, ColorSpaceInfo::AssumedSrgb)
+    } else {
+        icc::from_png_chunks(png.gamma, png.chromaticities, gray)
+    };
+    (icc, color, None)
+}
+
+/// Los TIFF en YCbCr (con submuestreo o con JPEG dentro) o en Lab no los lee `image`, que solo
+/// dice «color type Unknown»: se explica qué pasa.
+fn explain_tiff_error(bytes: &[u8], format: SourceFormat, e: image::ImageError) -> Error {
+    if format != SourceFormat::Tiff || !matches!(e, image::ImageError::Unsupported(_)) {
+        return e.into();
     }
-    icc::from_png_chunks(png.gamma, png.chromaticities, gray)
+    let photometric = meta::tiff_decoder(bytes).and_then(|mut d| {
+        d.get_tag_u32(tiff::tags::Tag::PhotometricInterpretation)
+            .ok()
+    });
+    let what = match photometric {
+        Some(6) => "TIFF en YCbCr (con submuestreo o con JPEG dentro)",
+        Some(8..=10) => "TIFF en color Lab",
+        _ => return e.into(),
+    };
+    Error::Unsupported(format!(
+        "{what}: Renuevo no lo lee. Ábrelo en Vista Previa y expórtalo como TIFF o PNG en RGB"
+    ))
 }
 
 /// Lee el ICC de un TIFF directamente con la crate `tiff`.

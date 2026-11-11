@@ -81,7 +81,10 @@ pub fn side_panel(ui: &mut Ui, state: PanelState<'_>) -> Vec<Action> {
                 let cfg = settings.pipeline();
                 let (w, h) = cfg.output_size(photo.width(), photo.height());
                 let mp = f64::from(w) * f64::from(h) / 1e6;
-                let ram = cfg.estimate_peak_bytes(photo.width(), photo.height()) as f64 / 1e9;
+                let ram =
+                    cfg.estimate_peak_bytes_for(photo.width(), photo.height(), photo.image.color())
+                        as f64
+                        / 1e9;
                 let text = format!("Salida: {w} × {h} ({mp:.1} MP) · RAM ≈ {ram:.1} GB");
                 if mp > settings.max_output_megapixels {
                     ui.colored_label(
@@ -160,9 +163,17 @@ pub fn side_panel(ui: &mut Ui, state: PanelState<'_>) -> Vec<Action> {
                 "{} no puede guardar esta foto ({:?}) sin pérdida: elige {}.",
                 settings.encode.format.extension().to_uppercase(),
                 photo.image.color(),
-                OutputFormat::suggestion_for(photo.image.color())
+                settings.encode.format.alternatives_for(photo.image.color())
             ),
         );
+    }
+    if let Some(photo) = photo {
+        let (w, h) = settings
+            .pipeline()
+            .output_size(photo.width(), photo.height());
+        if let Some(problem) = settings.encode.format.size_problem(w, h) {
+            ui.colored_label(WARN, problem);
+        }
     }
     if photo.is_some_and(|p| p.info.format == SourceFormat::Jpeg)
         && settings.mode == Mode::ExactCopy
@@ -254,6 +265,14 @@ fn photo_info(ui: &mut Ui, photo: &Photo) {
     if info.orientation_applied {
         ui.label(RichText::new("Orientación aplicada a los píxeles").small());
     }
+    ui.label(
+        RichText::new(
+            "La copia lleva solo los píxeles, el perfil de color y los DPI: el resto de metadatos \
+             (EXIF, XMP, IPTC, Content Credentials/C2PA, textos incrustados) no se copia.",
+        )
+        .small()
+        .weak(),
+    );
 }
 
 fn enhance_controls(

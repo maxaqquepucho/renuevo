@@ -90,3 +90,52 @@ fn render_screenshots() {
     harness.get_by_label("Lotes").click();
     save(&mut harness, "3-lotes.png");
 }
+
+/// A 1:1 cada píxel de la foto debe caer en un píxel físico: un damero de 1 px no puede salir
+/// gris (mezclado por el filtrado) sea cual sea la paridad del tamaño o la densidad de pantalla.
+#[test]
+#[ignore = "necesita GPU"]
+fn one_to_one_is_sharp_whatever_the_size_parity() {
+    let dir = tempfile::tempdir().unwrap();
+    for ppp in [1.0f32, 2.0] {
+        for (w, h) in [(3000u32, 2000u32), (3001, 2001), (3000, 2001)] {
+            let path = dir.path().join(format!("damero_{w}x{h}.png"));
+            image::RgbImage::from_fn(
+                w,
+                h,
+                |x, y| Rgb([if (x + y) % 2 == 0 { 255 } else { 0 }; 3]),
+            )
+            .save(&path)
+            .unwrap();
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(1000.0, 640.0))
+                .with_pixels_per_point(ppp)
+                .wgpu()
+                .build_eframe(|cc| RenuevoApp::new(cc));
+            let ctx = harness.ctx.clone();
+            harness.state_mut().open_path(&ctx, path);
+            wait_idle(&mut harness);
+            harness.get_by_label("1:1").click();
+            // El recorte nítido se prepara en otro hilo.
+            for _ in 0..60 {
+                harness.step();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let img = harness.render().expect("render");
+            let (iw, ih) = img.dimensions();
+            let (mut grey, mut total) = (0u64, 0u64);
+            for y in ih * 35 / 100..ih * 65 / 100 {
+                for x in iw * 62 / 100..iw * 92 / 100 {
+                    total += 1;
+                    grey += u64::from((40..=215).contains(&img.get_pixel(x, y)[1]));
+                }
+            }
+            let share = grey as f64 / total as f64;
+            assert!(
+                share < 0.01,
+                "{w}×{h} a {ppp}×: {:.1} % gris",
+                share * 100.0
+            );
+        }
+    }
+}
