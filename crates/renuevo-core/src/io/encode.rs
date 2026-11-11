@@ -92,7 +92,22 @@ pub enum PngCompression {
     Fast,
     #[default]
     Balanced,
+    /// Recomprime con oxipng la salida de `Balanced`: nunca ocupa más que ella y en fotos suele
+    /// ocupar un 10 % menos, pero tarda de 1,5 a 3 veces lo que la compresión máxima de `image`.
+    /// En imágenes enormes usa esa compresión máxima: ver [`oxipng_fits`].
     Max,
+}
+
+/// Datos sin comprimir que oxipng acepta como máximo (filas con su byte de filtro). oxipng
+/// prueba varios filtros en paralelo y necesita unas 7,5 veces esto de memoria: 512 MiB son unos
+/// 180 MP en RGB de 8 bits o 90 MP en RGB de 16 bits, con unos 4 GB más de pico.
+const OXIPNG_MAX_RAW_BYTES: u64 = 512 << 20;
+
+/// ¿Se recomprime con oxipng una imagen así? Por encima del límite, «Máxima» usa la compresión
+/// máxima de `image`, que no necesita memoria extra.
+pub fn oxipng_fits(width: u32, height: u32, color: ColorType) -> bool {
+    let row = 1 + u64::from(width) * u64::from(color.bytes_per_pixel());
+    row * u64::from(height) <= OXIPNG_MAX_RAW_BYTES
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -101,6 +116,15 @@ pub struct EncodeOptions {
     pub png_compression: PngCompression,
     /// Resolución de impresión que se anota en PNG (`pHYs`) y TIFF. WebP no tiene dónde.
     pub dpi: Option<Dpi>,
+}
+
+impl EncodeOptions {
+    /// ¿Se usará oxipng para guardar una imagen así?
+    pub fn uses_oxipng(&self, width: u32, height: u32, color: ColorType) -> bool {
+        self.format == OutputFormat::Png
+            && self.png_compression == PngCompression::Max
+            && oxipng_fits(width, height, color)
+    }
 }
 
 /// Codifica en memoria. Falla en lugar de convertir si el formato no puede guardar los píxeles
@@ -127,15 +151,28 @@ pub fn encode(
     let mut buf = Vec::new();
     match options.format {
         OutputFormat::Png => {
+            let optimize = options.uses_oxipng(image.width(), image.height(), color);
             let compression = match options.png_compression {
                 PngCompression::Fast => CompressionType::Fast,
                 PngCompression::Balanced => CompressionType::Default,
+                // oxipng filtra y comprime desde cero, pero devuelve lo que recibe si no logra
+                // mejorarlo (imágenes diminutas o casi planas): partiendo de la compresión
+                // equilibrada, «Máxima» nunca ocupa más que ella.
+                PngCompression::Max if optimize => CompressionType::Default,
                 PngCompression::Max => CompressionType::Best,
             };
             let mut encoder =
                 PngEncoder::new_with_quality(&mut buf, compression, PngFilter::Adaptive);
             set_icc(&mut encoder, icc)?;
             image.write_with_encoder(encoder)?;
+            if optimize {
+                buf = oxipng::optimize_from_memory(&buf, &oxipng_options()).map_err(|e| {
+                    ImageError::Encoding(image::error::EncodingError::new(
+                        image::error::ImageFormatHint::Exact(image::ImageFormat::Png),
+                        e,
+                    ))
+                })?;
+            }
             if let Some(dpi) = dpi {
                 buf = meta::png_with_dpi(buf, dpi);
             }
@@ -148,6 +185,23 @@ pub fn encode(
         }
     }
     Ok(buf)
+}
+
+/// oxipng con su nivel por defecto (`-o 2`), limitado a lo que no cambia el archivo más que en
+/// la compresión: mismo tipo de píxel y profundidad (sin pasar a paleta, a gris ni a 8 bits),
+/// mismo entrelazado, los mismos chunks (el ICC sigue siendo el mismo, solo recomprimido) y sin
+/// tocar el color de los píxeles transparentes. La verificación posterior lo comprueba igual.
+fn oxipng_options() -> oxipng::Options {
+    let mut o = oxipng::Options::from_preset(2);
+    o.bit_depth_reduction = false;
+    o.color_type_reduction = false;
+    o.palette_reduction = false;
+    o.grayscale_reduction = false;
+    o.interlace = None;
+    o.optimize_alpha = false;
+    o.scale_16 = false;
+    o.strip = oxipng::StripChunks::None;
+    o
 }
 
 /// TIFF con la crate `tiff` directamente (el codificador de `image` no escribe DPI ni declara

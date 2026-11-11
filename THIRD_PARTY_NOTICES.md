@@ -27,6 +27,26 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
+## Librerías que lleva Renuevo.app
+
+`scripts/bundle-macos.sh` copia en `Contents/Frameworks` las librerías dinámicas de Homebrew que
+usa libheif y sus textos de licencia en `Contents/Resources/Licencias`. No cambia su código: solo
+reescribe las rutas con las que se cargan entre sí y las vuelve a firmar. Con la versión actual de
+Homebrew son:
+
+| Librería | Licencia | Para qué |
+|---|---|---|
+| libheif | LGPL-3.0-or-later | Leer HEIC/HEIF |
+| libde265 | LGPL-3.0-or-later | Decodificar HEVC (HEIC) |
+| x265 | GPL-2.0-or-later | Codificar HEVC: Renuevo no lo usa, pero libheif lo enlaza |
+| aom | BSD-2-Clause | AV1 (HEIF con AVIF dentro) |
+| libvmaf | BSD-2-Clause-Patent | Dependencia de aom |
+| libsharpyuv (webp) | BSD-3-Clause | Conversión a YUV de libheif |
+
+Como van enlazadas dinámicamente, se pueden sustituir por otras versiones. Por x265, que es GPL,
+repartir Renuevo.app con HEIC implica cumplir la GPL; `--sin-heic` crea una app sin ninguna de
+ellas.
+
 ## Algoritmos publicados en los que se basa el código
 
 - Non-Local Means: A. Buades, B. Coll, J.-M. Morel, «A non-local algorithm for image denoising», CVPR 2005.

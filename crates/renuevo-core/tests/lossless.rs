@@ -78,6 +78,85 @@ fn icc_profile_is_preserved_byte_for_byte() {
     assert_roundtrip(&common::rgb16(40, 30), Some(&p3), OutputFormat::Png);
 }
 
+/// «Máxima» recomprime con oxipng: el archivo pesa menos, pero los píxeles, el perfil, los DPI y
+/// el tipo de píxel que declara el PNG son los mismos, y sale igual byte a byte cada vez.
+#[test]
+fn max_png_compression_uses_oxipng_and_changes_nothing_else() {
+    use image::{ImageBuffer, Luma, LumaA, Rgba};
+    use renuevo_core::Dpi;
+    use renuevo_core::io::PngCompression;
+    use renuevo_core::io::encode::oxipng_fits;
+
+    let p3 = ColorProfile::new_display_p3().encode().unwrap();
+    // oxipng cambiaría un perfil sRGB por un chunk `sRGB` si se le dejara quitar chunks.
+    let srgb = ColorProfile::new_srgb().encode().unwrap();
+    let transparent = DynamicImage::ImageRgba8(ImageBuffer::from_fn(64, 48, |x, y| {
+        let a = if (x + y) % 3 == 0 { 0 } else { 255 };
+        Rgba([(x * 4) as u8, (y * 5) as u8, 77, a])
+    }));
+    // Pocos valores, todos múltiplos de 257: oxipng lo pasaría a paleta o a 8 bits.
+    let few_levels = DynamicImage::ImageLuma16(ImageBuffer::from_fn(64, 48, |x, _| {
+        Luma([(x % 4) as u16 * 257])
+    }));
+    let gray_alpha = DynamicImage::ImageLumaA8(ImageBuffer::from_fn(64, 48, |x, y| {
+        LumaA([(x * 3) as u8, if y % 2 == 0 { 0 } else { 200 }])
+    }));
+    // Donde oxipng no mejora la compresión equilibrada: un píxel, filas planas y una columna.
+    let one_pixel = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(1, 1, image::Rgb([9, 8, 7])));
+    let flat_rows =
+        DynamicImage::ImageLuma8(ImageBuffer::from_fn(256, 256, |_, y| Luma([y as u8])));
+    let column = DynamicImage::ImageRgb8(ImageBuffer::from_fn(1, 5000, |_, y| {
+        image::Rgb([(y / 20) as u8, 40, 200])
+    }));
+    let cases: [(DynamicImage, Option<&[u8]>); 8] = [
+        (common::rgb8(300, 200), Some(&p3)),
+        (common::rgb16(300, 200), Some(&srgb)),
+        (transparent, None),
+        (few_levels, None),
+        (gray_alpha, None),
+        (one_pixel, None),
+        (flat_rows, None),
+        (column, None),
+    ];
+    let dpi = Dpi::new(300.0, 150.0);
+    for (image, icc) in &cases {
+        let color = image.color();
+        let balanced = EncodeOptions {
+            format: OutputFormat::Png,
+            png_compression: PngCompression::Balanced,
+            dpi,
+        };
+        let max = EncodeOptions {
+            png_compression: PngCompression::Max,
+            ..balanced
+        };
+        assert!(max.uses_oxipng(image.width(), image.height(), color));
+        let small = encode(image, *icc, &max).unwrap();
+        assert_eq!(small, encode(image, *icc, &max).unwrap(), "{color:?}");
+        let normal = encode(image, *icc, &balanced).unwrap();
+        assert!(
+            small.len() <= normal.len(),
+            "{color:?}: {} > {}",
+            small.len(),
+            normal.len()
+        );
+        // IHDR: profundidad, tipo de color y entrelazado.
+        assert_eq!(
+            [small[24], small[25], small[28]],
+            [normal[24], normal[25], normal[28]],
+            "{color:?}"
+        );
+        let report = verify_encoded(image, *icc, &small).unwrap();
+        assert!(report.identical, "{color:?}: {:?}", report.mismatch);
+        assert!(report.icc_preserved, "{color:?}");
+        let read = decode_bytes(&small).unwrap().info.dpi.expect("DPI");
+        assert!((read.x - 300.0).abs() < 0.01 && (read.y - 150.0).abs() < 0.01);
+    }
+    // En imágenes enormes no se usa oxipng (necesitaría varios GB).
+    assert!(oxipng_fits(8000, 6000, ColorType::Rgb16));
+    assert!(!oxipng_fits(20_000, 10_000, ColorType::Rgb8));
+}
+
 /// Regresión: `image` 0.25.10 pierde el ICC de TIFF pequeños; nuestro decodificador no.
 #[test]
 fn small_tiff_keeps_icc_when_decoded() {

@@ -145,6 +145,24 @@ pub fn side_panel(ui: &mut Ui, state: PanelState<'_>) -> Vec<Action> {
                     ui.selectable_value(&mut settings.encode.png_compression, c, png_label(c));
                 }
             });
+        if settings.encode.png_compression == PngCompression::Max
+            && let Some(photo) = photo
+        {
+            let cfg = settings.pipeline();
+            let (w, h) = cfg.output_size(photo.width(), photo.height());
+            if !settings
+                .encode
+                .uses_oxipng(w, h, cfg.output_color(photo.image.color()))
+            {
+                ui.label(
+                    RichText::new(
+                        "Imagen demasiado grande para oxipng: se usa la compresión máxima normal.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            }
+        }
     }
     if settings.mode == Mode::Enhance && settings.encode.format != OutputFormat::WebP {
         ui.horizontal(|ui| {
@@ -205,7 +223,7 @@ fn png_label(c: PngCompression) -> &'static str {
     match c {
         PngCompression::Fast => "Rápida",
         PngCompression::Balanced => "Equilibrada",
-        PngCompression::Max => "Máxima (más lenta)",
+        PngCompression::Max => "Máxima (oxipng, más lenta)",
     }
 }
 

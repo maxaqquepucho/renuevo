@@ -26,6 +26,12 @@ quiere, **restaurarlas** (ruido, bloques JPEG) y **ampliarlas** con algoritmos c
   **CMYK** se convierten con su propio perfil (y la intención que declara, como ColorSync) a ProPhoto
   RGB en 16 bits, cuya gama contiene toda la de imprenta (PNG/TIFF/WebP no guardan CMYK): se ven igual
   que en macOS (diferencia media 1/255). El alfa premultiplicado (TIFF/HEIC) se pasa a alfa normal.
+- **Compresión PNG**: rápida, equilibrada o **máxima con [oxipng](https://github.com/oxipng/oxipng)**.
+  La máxima deja las fotos en torno a un 10 % más pequeñas que la equilibrada (hasta un 25 % en HEIC
+  de 10 bits) y nunca más grandes, pero tarda varias veces más: una foto de 24 MP, de 6 a 10 s en un
+  M5. Solo cambia cómo se comprime: mismo tipo de píxel y profundidad, mismo perfil y mismos DPI, y se
+  verifica igual. Por encima de ~180 MP en 8 bits (~90 MP en 16 bits) oxipng necesitaría más de 4 GB
+  de memoria y se usa la compresión máxima de `image`.
 - **Lotes**: aplica los ajustes a toda una carpeta, de una en una. Nunca sobrescribe un original:
   ninguna salida puede ser (por inodo) una foto de entrada, y `a.jpg` + `a.png` dan
   `a_jpg_renuevo.png` y `a_png_renuevo.png` en lugar de pisarse.
@@ -52,6 +58,23 @@ Sin libheif se puede compilar sin HEIC: `cargo build -p renuevo-app --no-default
 cargo run --release -p renuevo-app               # abre la app
 cargo run --release -p renuevo-app -- foto.heic  # abre la app con una foto
 ```
+
+### Como app de macOS
+
+```sh
+scripts/bundle-macos.sh              # crea target/release/Renuevo.app (con HEIC)
+scripts/bundle-macos.sh --sin-heic   # sin HEIC: más pequeña y declara macOS 11 como mínimo
+rm -rf /Applications/Renuevo.app     # la anterior, si la hay: copiar encima mezcla las dos
+cp -R target/release/Renuevo.app /Applications/
+```
+
+La app lleva dentro libheif y las librerías de Homebrew que usa (con sus licencias en
+`Contents/Resources/Licencias`), así que funciona aunque luego se desinstale Homebrew, y no carga
+los plugins de libheif que pueda haber en Homebrew (`libheif-plugins`). Pide la misma
+versión de macOS para la que Homebrew compiló esas librerías (la de este Mac). Se firma «ad hoc»:
+sirve para este Mac. Para repartirla haría falta firmarla con un certificado de Apple y notarizarla, y
+tener en cuenta que el x265 que trae libheif es GPL. El icono se genera con
+`cargo run -p renuevo-app --example make_icon`.
 
 Atajos: **⌘O** abrir · **⌘S** exportar · **F** o doble clic: ajustar · **1**: 100 % ·
 pellizco o ⌘+rueda: zoom · arrastrar o rueda: mover · arrastrar la línea blanca: comparar.
@@ -103,8 +126,12 @@ La app avisa en el panel de la foto de todo lo que no puede copiar:
   Tampoco los JPEG CMYK con la K a más resolución que C, M y Y (el decodificador los leería mal).
 - Un **JPEG o HEIC cortado o dañado** se abre igual, con la parte que falta en gris, verde o un color
   plano, y se avisa.
+- **Renuevo.app** no recibe archivos desde el Finder («Abrir con» o soltarlos en el icono del Dock):
+  winit, la capa de ventanas de egui, no lo ofrece, y añadirlo exige código `unsafe` de AppKit, que el
+  proyecto no permite. Se abren con ⌘O o soltándolos en la ventana.
 
 ## Licencias
 
 Código propio bajo MIT. EASU y RCAS son ports de AMD FidelityFX FSR 1 (MIT): ver
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), que también lista las licencias de las librerías
+que lleva Renuevo.app.

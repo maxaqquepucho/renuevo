@@ -80,6 +80,25 @@ impl PipelineConfig {
         }
     }
 
+    /// Tipo de píxel del resultado para una foto de tipo `source`: los mismos canales (gris o
+    /// color, con o sin alfa) con la profundidad de salida; la copia exacta no lo cambia.
+    pub fn output_color(&self, source: ColorType) -> ColorType {
+        if self.is_exact_copy() {
+            return source;
+        }
+        let eight = self.output_depth == BitDepth::Bits8;
+        match (source.channel_count(), eight) {
+            (1, true) => ColorType::L8,
+            (1, false) => ColorType::L16,
+            (2, true) => ColorType::La8,
+            (2, false) => ColorType::La16,
+            (3, true) => ColorType::Rgb8,
+            (3, false) => ColorType::Rgb16,
+            (_, true) => ColorType::Rgba8,
+            (_, false) => ColorType::Rgba16,
+        }
+    }
+
     /// Memoria aproximada (bytes) que el procesado de una foto de `w`×`h` con los canales de
     /// `color` añade a la app en su pico (la foto ya abierta no cuenta). Sale algo por encima de
     /// lo medido, nunca por debajo. 0 para la copia exacta.

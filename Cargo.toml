@@ -34,6 +34,8 @@ png = "0.18.1"
 # Misma versión que usa `image`; para leer los valores CMYK sin convertir (ver io::cmyk).
 zune-jpeg = "0.5.15"
 zune-core = "0.5.3"
+# Recompresión sin pérdida de PNG (opción «Máxima»). Sin la CLI (clap) ni zopfli.
+oxipng = { version = "10.2.1", default-features = false, features = ["parallel"] }
 # CRC de los chunks PNG que añadimos (pHYs con los DPI).
 crc32fast = "1.5.5"
 

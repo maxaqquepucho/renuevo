@@ -333,8 +333,13 @@ impl RenuevoApp {
         };
         self.job = Some(
             Job::spawn(ctx, "Guardando y verificando", move |progress| {
-                progress.begin("Codificando y comparando cada píxel", 1);
                 let image = processed.as_deref().unwrap_or(&photo.image);
+                let stage = if encode.uses_oxipng(image.width(), image.height(), image.color()) {
+                    "Comprimiendo con oxipng y comparando cada píxel"
+                } else {
+                    "Codificando y comparando cada píxel"
+                };
+                progress.begin(stage, 1);
                 JobResult::Exported(
                     export(image, photo.icc.as_deref(), &path, &encode).map_err(|e| e.to_string()),
                 )
