@@ -1,0 +1,36 @@
+[package]
+name = "renuevo-app"
+description = "App de escritorio de renuevo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "renuevo"
+path = "src/main.rs"
+
+[features]
+default = ["heic"]
+# Abrir HEIC/HEIF (necesita `brew install libheif pkg-config`).
+heic = ["renuevo-core/heic"]
+
+[dependencies]
+renuevo-core.workspace = true
+eframe.workspace = true
+egui.workspace = true
+rfd.workspace = true
+image.workspace = true
+fast_image_resize.workspace = true
+moxcms.workspace = true
+bytemuck.workspace = true
+
+[dev-dependencies]
+egui_kittest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
