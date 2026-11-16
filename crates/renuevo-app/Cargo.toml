@@ -29,6 +29,9 @@ moxcms.workspace = true
 bytemuck.workspace = true
 rayon.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+muda.workspace = true
+
 [dev-dependencies]
 egui_kittest.workspace = true
 tempfile.workspace = true

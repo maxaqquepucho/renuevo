@@ -15,6 +15,7 @@ use egui::{
 };
 
 use crate::display::{self, DisplaySource};
+use crate::theme::{self, semibold};
 
 pub const PROXY_MAX_SIDE: u32 = 4096;
 const FULL_UV: Rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
@@ -359,28 +360,24 @@ impl Viewer {
         self.center = (self.image_size / 2.0).to_pos2();
     }
 
+    /// Dibuja el visor. Sin foto, muestra cómo empezar; devuelve `true` si se pulsa «Abrir foto…»
+    /// (activo solo con `can_open`).
     pub fn ui(
         &mut self,
         ui: &mut Ui,
         before: Option<&mut Layer>,
         after: Option<&mut Layer>,
         hint: Option<&str>,
-    ) {
+        can_open: bool,
+    ) -> bool {
+        let Some(before) = before else {
+            return empty_state(ui, can_open);
+        };
         let (view, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         self.last_view = view;
         let painter = ui.painter_at(view);
-        painter.rect_filled(view, 0.0, Color32::from_gray(22));
+        painter.rect_filled(view, 0.0, theme::palette(ui).canvas);
 
-        let Some(before) = before else {
-            painter.text(
-                view.center(),
-                Align2::CENTER_CENTER,
-                "Arrastra una foto aquí o pulsa «Abrir foto…»",
-                FontId::proportional(18.0),
-                Color32::GRAY,
-            );
-            return;
-        };
         if self.needs_fit {
             self.fit(view);
             self.needs_fit = false;
@@ -466,20 +463,16 @@ impl Viewer {
                 after.paint(&ctx, &after_painter, img_rect, self.zoom, ppp, idle);
             }
             if self.compare == CompareMode::Split {
-                painter.line_segment(
-                    [pos2(split_x, view.min.y), pos2(split_x, view.max.y)],
-                    Stroke::new(2.0, Color32::WHITE),
-                );
-                painter.circle_filled(pos2(split_x, view.center().y), 7.0, Color32::WHITE);
+                split_handle(&painter, split_x, view);
                 label(
                     &painter,
-                    pos2(split_x - 8.0, view.min.y + 8.0),
+                    pos2(split_x - 14.0, view.min.y + 12.0),
                     Align2::RIGHT_TOP,
                     "ANTES",
                 );
                 label(
                     &painter,
-                    pos2(split_x + 8.0, view.min.y + 8.0),
+                    pos2(split_x + 14.0, view.min.y + 12.0),
                     Align2::LEFT_TOP,
                     "DESPUÉS",
                 );
@@ -488,14 +481,14 @@ impl Viewer {
 
         label(
             &painter,
-            view.left_bottom() + vec2(8.0, -8.0),
+            view.left_bottom() + vec2(16.0, -12.0),
             Align2::LEFT_BOTTOM,
             &format!("{:.0} %", self.zoom_percent(ppp)),
         );
         if let Some(hint) = hint {
             label(
                 &painter,
-                view.center_bottom() + vec2(0.0, -8.0),
+                view.center_bottom() + vec2(0.0, -12.0),
                 Align2::CENTER_BOTTOM,
                 hint,
             );
@@ -504,15 +497,102 @@ impl Viewer {
             // Tras dejar de mover, volver a pintar para generar el recorte nítido.
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(IDLE_SECONDS + 0.02));
         }
+        false
+    }
+}
+
+/// Sin foto: un dibujo de una foto, qué se puede hacer y el botón para abrirla.
+fn empty_state(ui: &mut Ui, can_open: bool) -> bool {
+    let p = theme::palette(ui);
+    let rect = ui.available_rect_before_wrap();
+    ui.painter().rect_filled(rect, 0.0, p.canvas);
+    let mut open = false;
+    let block = Rect::from_center_size(rect.center(), vec2(420.0, 260.0));
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(block)
+            .layout(egui::Layout::top_down(egui::Align::Center)),
+        |ui| {
+            let (icon, _) = ui.allocate_exact_size(vec2(96.0, 76.0), Sense::hover());
+            photo_glyph(ui.painter(), icon, p.tertiary);
+            ui.add_space(14.0);
+            ui.label(
+                egui::RichText::new("Arrastra aquí una foto")
+                    .font(FontId::new(20.0, semibold()))
+                    .color(p.text),
+            );
+            ui.label(
+                egui::RichText::new(
+                    "JPEG, PNG, WebP, TIFF o HEIC. Suelta una carpeta para procesarla por lotes.",
+                )
+                .color(p.secondary),
+            );
+            ui.add_space(14.0);
+            open = crate::widgets::primary_button(ui, "Abrir foto…", can_open, false)
+                .on_hover_text("⌘O")
+                .clicked();
+        },
+    );
+    ui.allocate_rect(rect, Sense::hover());
+    open
+}
+
+/// Silueta de una foto (marco, sol y montañas) con trazos, sin depender de ninguna fuente.
+fn photo_glyph(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let stroke = Stroke::new(3.0, color);
+    let frame = rect.shrink(2.0);
+    painter.rect_stroke(frame, 12.0, stroke, egui::StrokeKind::Middle);
+    let at = |x: f32, y: f32| {
+        pos2(
+            frame.left() + x * frame.width(),
+            frame.top() + y * frame.height(),
+        )
+    };
+    painter.circle_stroke(at(0.72, 0.3), frame.height() * 0.1, stroke);
+    painter.add(egui::Shape::line(
+        vec![
+            at(0.1, 0.84),
+            at(0.38, 0.46),
+            at(0.6, 0.74),
+            at(0.72, 0.6),
+            at(0.9, 0.84),
+        ],
+        stroke,
+    ));
+}
+
+/// Línea del comparador con un asa redonda y dos flechas, como en el icono de la app.
+fn split_handle(painter: &egui::Painter, x: f32, view: Rect) {
+    painter.line_segment(
+        [pos2(x, view.min.y), pos2(x, view.max.y)],
+        Stroke::new(2.0, Color32::WHITE),
+    );
+    let c = pos2(x, view.center().y);
+    painter.circle_filled(c + vec2(0.0, 1.5), 17.0, Color32::from_black_alpha(70));
+    painter.circle_filled(c, 16.0, Color32::WHITE);
+    let dark = Color32::from_gray(40);
+    for dir in [-1.0f32, 1.0] {
+        let tip = c + vec2(dir * 10.0, 0.0);
+        let back = c + vec2(dir * 4.0, 0.0);
+        painter.add(egui::Shape::convex_polygon(
+            vec![tip, back + vec2(0.0, -5.0), back + vec2(0.0, 5.0)],
+            dark,
+            Stroke::NONE,
+        ));
     }
 }
 
 fn label(painter: &egui::Painter, pos: Pos2, align: Align2, text: &str) {
-    let galley =
-        painter.layout_no_wrap(text.to_owned(), FontId::proportional(13.0), Color32::WHITE);
-    let rect = align.anchor_size(pos, galley.size()).expand(4.0);
-    painter.rect_filled(rect, 4.0, Color32::from_black_alpha(160));
-    painter.galley(rect.min + vec2(4.0, 4.0), galley, Color32::WHITE);
+    let galley = painter.layout_no_wrap(
+        text.to_owned(),
+        FontId::new(12.0, semibold()),
+        Color32::WHITE,
+    );
+    let rect = align
+        .anchor_size(pos, galley.size())
+        .expand2(vec2(8.0, 4.0));
+    painter.rect_filled(rect, rect.height() / 2.0, Color32::from_black_alpha(150));
+    painter.galley(rect.min + vec2(8.0, 4.0), galley, Color32::WHITE);
 }
 
 #[cfg(test)]

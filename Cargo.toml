@@ -43,6 +43,8 @@ eframe = "0.37.0"
 egui = "0.37.0"
 egui_kittest = { version = "0.37.0", features = ["eframe", "wgpu", "snapshot"] }
 rfd = "0.18.0"
+# Barra de menús nativa de macOS (Archivo, Ver, Ventana) con atajos de teclado.
+muda = { version = "0.21.2", default-features = false }
 
 tempfile = "3.27.0"
 

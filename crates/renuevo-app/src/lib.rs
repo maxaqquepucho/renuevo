@@ -6,9 +6,13 @@
 mod app;
 mod batch_ui;
 mod display;
+#[cfg(target_os = "macos")]
+mod menu;
 mod panels;
 mod settings;
+mod theme;
 mod viewer;
+mod widgets;
 mod worker;
 
 pub use app::RenuevoApp;

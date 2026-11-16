@@ -76,7 +76,11 @@ sirve para este Mac. Para repartirla haría falta firmarla con un certificado de
 tener en cuenta que el x265 que trae libheif es GPL. El icono se genera con
 `cargo run -p renuevo-app --example make_icon`.
 
-Atajos: **⌘O** abrir · **⌘S** exportar · **F** o doble clic: ajustar · **1**: 100 % ·
+La interfaz sigue el aspecto de macOS: fuente del sistema (San Francisco), tema claro u oscuro
+según el sistema, barra de título unificada y barra de menús nativa (Archivo, Ver, Ventana).
+
+Atajos: **⌘O** abrir · **⇧⌘O** abrir carpeta para lotes · **⌘S** exportar · **⌘1** / **⌘2**
+pestañas Foto / Lotes · **F**, **⌘9** o doble clic: ajustar · **1** o **⌘0**: 100 % ·
 pellizco o ⌘+rueda: zoom · arrastrar o rueda: mover · arrastrar la línea blanca: comparar.
 También se puede arrastrar una foto (o una carpeta, que abre «Lotes») a la ventana.
 
@@ -86,7 +90,8 @@ También se puede arrastrar una foto (o una carpeta, que abre «Lotes») a la ve
 crates/renuevo-core   biblioteca sin GUI: io (decode/encode/ICC/HEIC), verify, export,
                       restore (deblock, chroma, nlm, noise, sharpen), upscale (lanczos, easu, rcas),
                       pipeline, batch, metrics (PSNR/SSIM)
-crates/renuevo-app    GUI con eframe/egui 0.37: visor, paneles, lotes, trabajos en segundo plano
+crates/renuevo-app    GUI con eframe/egui 0.37: visor, paneles, lotes, trabajos en segundo plano,
+                      tema y controles de macOS (theme, widgets) y barra de menús (menu, con muda)
 ```
 
 ## Tests y medidas

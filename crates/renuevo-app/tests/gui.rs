@@ -75,9 +75,7 @@ fn open_exact_copy_enhance_and_export_through_the_gui() {
     );
 
     // Mejorar desde la interfaz: clic en el modo, activar ampliar ×2 y pulsar Procesar.
-    harness
-        .get_by_label("Mejorar (restaurar y/o ampliar)")
-        .click();
+    harness.get_by_label("Mejorar").click();
     // Sin pulsar «Procesar», la zona visible se previsualiza sola tras una breve espera.
     harness.run_steps(4);
     wait_idle(&mut harness);
@@ -133,9 +131,7 @@ fn region_preview_does_not_relaunch_forever() {
     let ctx = harness.ctx.clone();
     harness.state_mut().open_path(&ctx, input);
     wait_idle(&mut harness);
-    harness
-        .get_by_label("Mejorar (restaurar y/o ampliar)")
-        .click();
+    harness.get_by_label("Mejorar").click();
     harness.get_by_label("1:1").click();
     for _ in 0..3 {
         harness.run_steps(4);

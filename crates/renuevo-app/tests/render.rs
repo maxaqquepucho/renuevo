@@ -72,13 +72,12 @@ fn render_screenshots() {
         img.save(out.join(name)).unwrap();
     };
 
+    save(&mut harness, "0-vacia.png");
     harness.state_mut().open_path(&ctx, input);
     wait_idle(&mut harness);
     save(&mut harness, "1-copia-exacta.png");
 
-    harness
-        .get_by_label("Mejorar (restaurar y/o ampliar)")
-        .click();
+    harness.get_by_label("Mejorar").click();
     harness.run_steps(2);
     harness.get_by_label("Fuerte").click();
     harness.run_steps(2);
@@ -87,8 +86,17 @@ fn render_screenshots() {
     wait_idle(&mut harness);
     save(&mut harness, "2-restaurar-comparar.png");
 
+    harness.get_by_label("Ampliar").click();
+    save(&mut harness, "3-ampliar.png");
+
     harness.get_by_label("Lotes").click();
-    save(&mut harness, "3-lotes.png");
+    save(&mut harness, "4-lotes.png");
+
+    // El mismo recorrido con el tema claro de macOS.
+    ctx.set_theme(egui::Theme::Light);
+    save(&mut harness, "5-lotes-claro.png");
+    harness.get_by_label("Foto").click();
+    save(&mut harness, "6-foto-claro.png");
 }
 
 /// A 1:1 cada píxel de la foto debe caer en un píxel físico: un damero de 1 px no puede salir
@@ -123,14 +131,25 @@ fn one_to_one_is_sharp_whatever_the_size_parity() {
             }
             let img = harness.render().expect("render");
             let (iw, ih) = img.dimensions();
-            let (mut grey, mut total) = (0u64, 0u64);
+            let (mut grey, mut white, mut total) = (0u64, 0u64, 0u64);
+            // Dentro del visor: el panel de ajustes ocupa la derecha de la ventana.
             for y in ih * 35 / 100..ih * 65 / 100 {
-                for x in iw * 62 / 100..iw * 92 / 100 {
+                for x in iw * 8 / 100..iw * 52 / 100 {
+                    let v = img.get_pixel(x, y)[1];
                     total += 1;
-                    grey += u64::from((40..=215).contains(&img.get_pixel(x, y)[1]));
+                    grey += u64::from((40..=215).contains(&v));
+                    white += u64::from(v > 215);
                 }
             }
             let share = grey as f64 / total as f64;
+            // Si la zona cayera fuera de la foto (fondo oscuro), no habría gris y el test
+            // pasaría sin mirar nada: la mitad del damero tiene que ser blanca.
+            let white = white as f64 / total as f64;
+            assert!(
+                (0.4..=0.6).contains(&white),
+                "{w}×{h} a {ppp}×: la zona medida no es el damero ({:.1} % blanco)",
+                white * 100.0
+            );
             assert!(
                 share < 0.01,
                 "{w}×{h} a {ppp}×: {:.1} % gris",
