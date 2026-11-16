@@ -30,7 +30,7 @@ fn wait_idle(harness: &mut Harness<'_, RenuevoApp>) {
 }
 
 /// Degrada la foto (ruido + JPEG calidad 25) para que se note la restauración.
-fn degraded_copy(photo: &DynamicImage, out: &std::path::Path) -> PathBuf {
+fn degraded_copy(photo: &DynamicImage, out: &std::path::Path, name: &str) -> PathBuf {
     let mut seed = 0x2545_F491_4F6C_DD1Du64;
     let mut noisy = photo.to_rgb8();
     for p in noisy.pixels_mut() {
@@ -42,7 +42,7 @@ fn degraded_copy(photo: &DynamicImage, out: &std::path::Path) -> PathBuf {
         };
         *p = Rgb(p.0.map(|v| (i32::from(v) + n()).clamp(0, 255) as u8));
     }
-    let path = out.join("degradada.jpg");
+    let path = out.join(name);
     let mut buf = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 25)
         .encode_image(&noisy)
@@ -58,7 +58,7 @@ fn render_screenshots() {
     let out = PathBuf::from(std::env::var("RENUEVO_OUT").expect("RENUEVO_OUT"));
     std::fs::create_dir_all(&out).unwrap();
     let original = renuevo_core::io::open(&photo_path).unwrap();
-    let input = degraded_copy(&original.image, &out);
+    let input = degraded_copy(&original.image, &out, "degradada.jpg");
 
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1400.0, 860.0))
@@ -157,4 +157,152 @@ fn one_to_one_is_sharp_whatever_the_size_parity() {
             );
         }
     }
+}
+
+#[derive(Debug)]
+struct Dropped(PathBuf);
+
+impl egui::DroppedFile for Dropped {
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        std::fs::read(&self.0).map_err(|e| e.to_string())
+    }
+}
+
+/// Una foto de móvil con poca luz: ruido moderado y JPEG de calidad 70.
+fn phone_copy(photo: &DynamicImage, out: &std::path::Path, name: &str) -> PathBuf {
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    let mut noisy = photo.to_rgb8();
+    for p in noisy.pixels_mut() {
+        let mut n = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 59) as i32 - 16 + ((seed >> 54) & 31) as i32 - 16
+        };
+        *p = Rgb(p
+            .0
+            .map(|v| (i32::from(v) + n() * 3 / 4).clamp(0, 255) as u8));
+    }
+    let path = out.join(name);
+    let mut buf = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 70)
+        .encode_image(&noisy)
+        .unwrap();
+    std::fs::write(&path, buf).unwrap();
+    path
+}
+
+/// Espera a que llegue el recorte nítido de la vista (se prepara en otro hilo).
+fn settle_detail(harness: &mut Harness<'_, RenuevoApp>) {
+    for _ in 0..60 {
+        harness.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Las capturas del README (`docs/images`), a 1280×800 y densidad 2×. Después,
+/// `scripts/frame-screenshots.swift` les pone el marco de ventana de macOS:
+///
+/// `RENUEVO_PHOTO=foto.jpg RENUEVO_OUT=capturas cargo test --release -p renuevo-app --test render readme -- --ignored`
+#[test]
+#[ignore = "necesita GPU y una foto: RENUEVO_PHOTO=… RENUEVO_OUT=…"]
+fn readme_screenshots() {
+    let photo_path = PathBuf::from(std::env::var("RENUEVO_PHOTO").expect("RENUEVO_PHOTO"));
+    let out = PathBuf::from(std::env::var("RENUEVO_OUT").expect("RENUEVO_OUT"));
+    std::fs::create_dir_all(&out).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let original = renuevo_core::io::open(&photo_path).unwrap();
+    let input = phone_copy(&original.image, work.path(), "valle.jpg");
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .with_pixels_per_point(2.0)
+        .wgpu()
+        .build_eframe(|cc| RenuevoApp::new(cc));
+    let ctx = harness.ctx.clone();
+    let save = |harness: &mut Harness<'_, RenuevoApp>, name: &str| {
+        // Sin puntero en la captura.
+        harness.event(egui::Event::PointerGone);
+        harness.run_steps(3);
+        harness
+            .render()
+            .expect("render")
+            .save(out.join(name))
+            .unwrap();
+    };
+
+    ctx.set_theme(egui::Theme::Dark);
+    save(&mut harness, "empty-dark.png");
+
+    // Restaurar una foto con ruido y compresión JPEG, y compararla.
+    harness.state_mut().open_path(&ctx, input);
+    wait_idle(&mut harness);
+    // Con el preajuste «Medio», el de partida.
+    harness.get_by_label("Mejorar").click();
+    harness.run_steps(2);
+    harness.get_by_label("Procesar").click();
+    harness.step();
+    wait_idle(&mut harness);
+    save(&mut harness, "compare-dark.png");
+
+    // El mismo comparador a 1:1: un píxel de la foto por píxel de pantalla.
+    harness.get_by_label("1:1").click();
+    settle_detail(&mut harness);
+    save(&mut harness, "detail-dark.png");
+
+    // Restaurar y ampliar ×2, con el tema claro.
+    harness.get_by_label("Ajustar").click();
+    ctx.set_theme(egui::Theme::Light);
+    harness.get_by_label("Ampliar").click();
+    harness.run_steps(2);
+    harness.get_by_label("Procesar").click();
+    harness.step();
+    wait_idle(&mut harness);
+    settle_detail(&mut harness);
+    save(&mut harness, "upscale-light.png");
+
+    // Una carpeta entera, como copia exacta verificada.
+    let folder = work.path().join("viaje");
+    std::fs::create_dir_all(&folder).unwrap();
+    let (w, h) = (original.image.width(), original.image.height());
+    for (i, (x, y)) in [
+        (0, 0),
+        (1, 0),
+        (2, 0),
+        (0, 1),
+        (1, 1),
+        (2, 1),
+        (0, 2),
+        (1, 2),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let crop = original
+            .image
+            .crop_imm(x * w / 4, y * h / 4, w / 2, h / 2)
+            .to_rgb8();
+        let name = format!(
+            "IMG_{:04}.{}",
+            2041 + i,
+            if i % 3 == 2 { "png" } else { "jpg" }
+        );
+        crop.save(folder.join(name)).unwrap();
+    }
+    harness.state_mut().settings_mut().mode = renuevo_app::Mode::ExactCopy;
+    harness
+        .input_mut()
+        .dropped_files
+        .push(std::sync::Arc::new(Dropped(folder)));
+    harness.run_steps(3);
+    harness.get_by_label("Procesar 8 fotos").click();
+    harness.step();
+    wait_idle(&mut harness);
+    save(&mut harness, "batch-light.png");
+    ctx.set_theme(egui::Theme::Dark);
+    save(&mut harness, "batch-dark.png");
 }

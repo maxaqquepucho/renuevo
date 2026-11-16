@@ -204,7 +204,19 @@ impl BatchUi {
                     settings.encode.format,
                 );
                 let example = planned.first().cloned().unwrap_or_else(|| first.clone());
-                note(ui, format!("Ejemplo: {}", example.display()));
+                let name = example.file_name().map_or_else(
+                    || example.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                );
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("Se guardarán como: {name}"))
+                            .small()
+                            .color(p.secondary),
+                    )
+                    .wrap(),
+                )
+                .on_hover_text(example.display().to_string());
             }
         });
 
@@ -349,7 +361,13 @@ fn folder_row(ui: &mut Ui, label: &str, dir: Option<&Path>, enabled: bool) -> Op
             {
                 chosen = rfd::FileDialog::new().pick_folder();
             }
-            ui.add(egui::Label::new(RichText::new(path_label(dir)).color(p.secondary)).truncate());
+            // Como en el Finder: el nombre de la carpeta, y la ruta entera al pasar el ratón.
+            let shown = ui.add(
+                egui::Label::new(RichText::new(folder_name(dir)).color(p.secondary)).truncate(),
+            );
+            if let Some(dir) = dir {
+                shown.on_hover_text(dir.display().to_string());
+            }
         });
     });
     chosen
@@ -372,8 +390,14 @@ fn status_label(p: &Palette, status: &ItemStatus) -> (Color32, Color32, String) 
     }
 }
 
-fn path_label(path: Option<&Path>) -> String {
-    path.map_or_else(|| "Sin elegir".to_owned(), |p| p.display().to_string())
+fn folder_name(path: Option<&Path>) -> String {
+    match path {
+        None => "Sin elegir".to_owned(),
+        Some(p) => p.file_name().map_or_else(
+            || p.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        ),
+    }
 }
 
 fn settings_summary(settings: &Settings) -> String {

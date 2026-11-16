@@ -1,142 +1,175 @@
-# Renuevo
+<p align="center">
+  <img src="crates/renuevo-app/assets/icon.png" width="128" alt="Renuevo app icon">
+</p>
 
-App de escritorio en Rust para **regenerar fotos píxel a píxel sin perder calidad** y, si se
-quiere, **restaurarlas** (ruido, bloques JPEG) y **ampliarlas** con algoritmos clásicos, sin IA.
+<h1 align="center">Renuevo</h1>
 
-## Qué hace
+<p align="center">
+  <b>Give your photos a fresh start.</b><br>
+  Re-save them pixel-perfect, clean up noise and JPEG artifacts, and upscale them,<br>
+  all on your Mac, with classical algorithms and no AI.
+</p>
 
-| Modo | Qué cambia | Garantía |
-|---|---|---|
-| **Copia exacta** | Nada: reescribe cada píxel en PNG/TIFF/WebP sin pérdida | Al guardar se vuelve a leer el archivo y se compara **cada píxel** con el original. Si algo no cuadra, no se escribe |
-| **Restaurar** | Bloques JPEG → ruido de color → grano (NLM) → enfoque con umbral | Se adapta al ruido que mide en la foto; en fotos limpias casi no actúa |
-| **Ampliar** | ×1,5 / ×2 / ×3 / ×4 con Lanczos3 o EASU («bordes nítidos») + RCAS | Salida en 16 bits para no crear bandas |
+<p align="center">
+  <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-111?logo=apple" alt="macOS on Apple Silicon">
+  <img src="https://img.shields.io/badge/Rust-2024-b7410e?logo=rust" alt="Rust 2024 edition">
+  <img src="https://img.shields.io/badge/AI-none-2ea44f" alt="No AI">
+  <img src="https://img.shields.io/badge/runs-100%25%20offline-0a84ff" alt="Runs 100% offline">
+</p>
 
-- **Formatos de entrada**: JPEG, PNG, WebP, TIFF y **HEIC** (iPhone), incluido HEIC de 10 bits sin truncar.
-- **Metadatos**: la copia es un archivo nuevo que lleva solo los píxeles, el **perfil de color** (ICC, o
-  NCLX de HEIC convertido a ICC: Display P3 sigue siendo Display P3) y los **DPI** (en PNG y TIFF; al
-  ampliar ×2 se duplican, para mantener el tamaño de impresión). Todo lo demás se **elimina**: EXIF
-  (GPS, cámara, fecha), XMP, IPTC, Content Credentials (C2PA), textos de PNG (como el prompt de una
-  imagen generada con IA), miniaturas y MakerNotes. Eso incluye la etiqueta de «generada con IA» que
-  llevan C2PA o XMP. La orientación del EXIF se aplica a los píxeles antes de quitarlo, para que la foto
-  no salga girada. Los perfiles que sintetiza la app llevan siempre la misma fecha, así que exportar
-  dos veces la misma foto da archivos idénticos byte a byte.
-- **Color que no es ICC**: `gAMA`/`cHRM`/`cICP` de PNG se convierten en un ICC equivalente (`cICP` manda
-  sobre `iCCP`, como en macOS y en la especificación PNG). En HEIC, un NCLX con curva de vídeo
-  (BT.709/BT.601) se trata como sRGB, que es como lo muestra macOS. Los JPEG/TIFF
-  **CMYK** se convierten con su propio perfil (y la intención que declara, como ColorSync) a ProPhoto
-  RGB en 16 bits, cuya gama contiene toda la de imprenta (PNG/TIFF/WebP no guardan CMYK): se ven igual
-  que en macOS (diferencia media 1/255). El alfa premultiplicado (TIFF/HEIC) se pasa a alfa normal.
-- **Compresión PNG**: rápida, equilibrada o **máxima con [oxipng](https://github.com/oxipng/oxipng)**.
-  La máxima deja las fotos en torno a un 10 % más pequeñas que la equilibrada (hasta un 25 % en HEIC
-  de 10 bits) y nunca más grandes, pero tarda varias veces más: una foto de 24 MP, de 6 a 10 s en un
-  M5. Solo cambia cómo se comprime: mismo tipo de píxel y profundidad, mismo perfil y mismos DPI, y se
-  verifica igual. Por encima de ~180 MP en 8 bits (~90 MP en 16 bits) oxipng necesitaría más de 4 GB
-  de memoria y se usa la compresión máxima de `image`.
-- **Lotes**: aplica los ajustes a toda una carpeta, de una en una. Nunca sobrescribe un original:
-  ninguna salida puede ser (por inodo) una foto de entrada, y `a.jpg` + `a.png` dan
-  `a_jpg_renuevo.png` y `a_png_renuevo.png` en lugar de pisarse.
-- **Visor**: comparador antes/después con divisor, zoom, vista 1:1 y gestión de color en pantalla (en
-  16 bits, con la intención que declara el perfil, también para perfiles de gris). Las fotos HDR (PQ/HLG)
-  se muestran con un mapeo de tonos parecido al de macOS en una pantalla normal. Con zoom, los cambios
-  de ajustes se previsualizan solos en la zona visible.
+<p align="center"><b>English</b> · <a href="README.es.md">Español</a></p>
 
-> Ningún algoritmo recupera información que ya se perdió. La copia exacta garantiza que **no se pierde
-> nada más**; restaurar y ampliar mejoran lo que se ve, pero no inventan detalle real.
+![Renuevo comparing a noisy photo before and after restoration](docs/images/compare.jpg)
 
-## Requisitos (macOS)
+## Why Renuevo?
+
+Photos pick up a lot along the way: sensor noise, blocky JPEG compression, and hidden metadata
+such as your GPS location. Renuevo gives you a clean copy you can trust:
+
+- **Nothing is lost by accident.** An exact copy is re-read after saving and compared with the
+  original **pixel by pixel**. If a single pixel differs, the file isn't written.
+- **Nothing is made up.** Restoration and upscaling use well-understood classical algorithms, not
+  generative AI, so you get your photo back, only cleaner, with no invented details.
+- **Nothing leaves your Mac.** No accounts, no uploads, no network.
+
+## What it can do
+
+| | |
+|---|---|
+| 🔒 **Exact copy** | Rewrites every pixel into a lossless PNG, TIFF or WebP and verifies it. 10-bit iPhone HEIC photos stay 16-bit instead of being cut down to 8. |
+| ✨ **Restore** | Removes JPEG blocking, color noise and grain (Non-Local Means), then adds a touch of sharpening. It measures the noise in each photo and barely touches clean ones. |
+| 🔍 **Upscale** | ×1.5, ×2, ×3 or ×4 with Lanczos3, or with edge-aware EASU plus RCAS sharpening (ported from AMD FidelityFX FSR 1). Saves in 16-bit to avoid banding. |
+| 🗂️ **Batch** | Applies the same settings to a whole folder, one photo at a time. It never overwrites an original. |
+| 🧹 **Privacy** | Keeps only the pixels, the color profile and the DPI. EXIF (GPS, camera, date), XMP, IPTC, Content Credentials and embedded text are removed. Orientation is applied first, so nothing ends up sideways. |
+| 🎨 **Color done right** | Embedded ICC profiles are preserved byte for byte, so Display P3 stays Display P3. HEIC color info, PNG gamma tags and CMYK files are converted the way macOS shows them. |
+
+### See the difference
+
+At 100% zoom, the grain and compression noise of a dim phone shot (left) are gone after
+restoring it (right), while the ridge line stays crisp:
+
+<p align="center">
+  <img src="docs/images/detail.jpg" width="720" alt="Close-up at 100%: noisy sky on the left, clean sky on the right">
+</p>
+
+### Feels at home on your Mac
+
+Light and dark mode follow your system. The app uses the San Francisco font, a unified title
+bar and a real macOS menu bar with keyboard shortcuts.
+
+![Restoring and upscaling ×2 in light mode](docs/images/upscale.jpg)
+
+### Whole folders at once
+
+Drop a folder on the window, press one button, and every photo is processed and verified. Names
+never collide:
+`a.jpg` and `a.png` become `a_jpg_renuevo.png` and `a_png_renuevo.png`.
+
+![Batch processing a folder of photos](docs/images/batch.jpg)
+
+> **Note:** the interface is in Spanish for now.
+
+## Getting started
+
+You need macOS and [Rust](https://rustup.rs) 1.95 or newer. To open HEIC photos, also install
+libheif:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # Rust estable (≥ 1.95)
-brew install libheif pkg-config                                   # solo para HEIC
+brew install libheif pkg-config     # only needed for HEIC
+git clone https://github.com/maxaqquepucho/renuevo.git
+cd renuevo
+cargo run --release -p renuevo-app  # opens the app
 ```
 
-Sin libheif se puede compilar sin HEIC: `cargo build -p renuevo-app --no-default-features`.
+You can also pass a photo: `cargo run --release -p renuevo-app -- photo.heic`. Without libheif,
+build with `--no-default-features` (everything except HEIC).
 
-## Uso
-
-```sh
-cargo run --release -p renuevo-app               # abre la app
-cargo run --release -p renuevo-app -- foto.heic  # abre la app con una foto
-```
-
-### Como app de macOS
+### Install it as a regular Mac app
 
 ```sh
-scripts/bundle-macos.sh              # crea target/release/Renuevo.app (con HEIC)
-scripts/bundle-macos.sh --sin-heic   # sin HEIC: más pequeña y declara macOS 11 como mínimo
-rm -rf /Applications/Renuevo.app     # la anterior, si la hay: copiar encima mezcla las dos
+scripts/bundle-macos.sh                          # builds target/release/Renuevo.app
+rm -rf /Applications/Renuevo.app                 # remove the previous copy, if any
 cp -R target/release/Renuevo.app /Applications/
 ```
 
-La app lleva dentro libheif y las librerías de Homebrew que usa (con sus licencias en
-`Contents/Resources/Licencias`), así que funciona aunque luego se desinstale Homebrew, y no carga
-los plugins de libheif que pueda haber en Homebrew (`libheif-plugins`). Pide la misma
-versión de macOS para la que Homebrew compiló esas librerías (la de este Mac). Se firma «ad hoc»:
-sirve para este Mac. Para repartirla haría falta firmarla con un certificado de Apple y notarizarla, y
-tener en cuenta que el x265 que trae libheif es GPL. El icono se genera con
-`cargo run -p renuevo-app --example make_icon`.
+The app bundles libheif and its libraries, so it keeps working even if you uninstall Homebrew.
+A few things to know:
 
-La interfaz sigue el aspecto de macOS: fuente del sistema (San Francisco), tema claro u oscuro
-según el sistema, barra de título unificada y barra de menús nativa (Archivo, Ver, Ventana).
+- **macOS version.** The HEIC build needs the macOS version Homebrew built those libraries for.
+  `scripts/bundle-macos.sh --sin-heic` makes a smaller app without HEIC that runs on macOS 11 or
+  later.
+- **Signing.** The app is signed "ad hoc", which is enough for your own Mac. Sharing it would need
+  an Apple Developer ID and notarization.
 
-Atajos: **⌘O** abrir · **⇧⌘O** abrir carpeta para lotes · **⌘S** exportar · **⌘1** / **⌘2**
-pestañas Foto / Lotes · **F**, **⌘9** o doble clic: ajustar · **1** o **⌘0**: 100 % ·
-pellizco o ⌘+rueda: zoom · arrastrar o rueda: mover · arrastrar la línea blanca: comparar.
-También se puede arrastrar una foto (o una carpeta, que abre «Lotes») a la ventana.
+## Keyboard shortcuts
 
-## Estructura
+| Action | Shortcut |
+|---|---|
+| Open a photo | <kbd>⌘</kbd> <kbd>O</kbd> |
+| Open a folder for batch processing | <kbd>⇧</kbd> <kbd>⌘</kbd> <kbd>O</kbd> |
+| Export | <kbd>⌘</kbd> <kbd>S</kbd> |
+| Photo / Batch tab | <kbd>⌘</kbd> <kbd>1</kbd> / <kbd>⌘</kbd> <kbd>2</kbd> |
+| Fit to window | <kbd>F</kbd>, <kbd>⌘</kbd> <kbd>9</kbd> or double-click |
+| Actual size (1:1) | <kbd>1</kbd> or <kbd>⌘</kbd> <kbd>0</kbd> |
+| Zoom | pinch, or <kbd>⌘</kbd> + scroll |
+| Pan | drag, or scroll |
+| Compare before and after | drag the white line |
+
+## Good to know
+
+- **No algorithm can recover detail that is already gone.** The exact copy guarantees nothing
+  *more* is lost. Restoring and upscaling make photos look cleaner and sharper, but they don't
+  invent real detail.
+- **HDR.** The gain maps of iPhone HDR photos don't fit in PNG, TIFF or WebP. The standard (SDR)
+  image is kept and the app tells you so.
+- **Multi-image files.** Multi-page TIFFs, animated PNG/WebP and HEIF sequences keep only their
+  first (or main) image.
+- **Anything inside the pixels stays.** Invisible watermarks, for example, are untouched, because
+  the exact copy doesn't change a single pixel.
+- **Finder's "Open With" isn't supported yet.** Open photos with <kbd>⌘</kbd> <kbd>O</kbd> or drag them
+  onto the window.
+
+The app warns you in its side panel about anything it can't copy. The
+[Spanish README](README.es.md) has the full list of edge cases.
+
+<details>
+<summary><b>Under the hood</b></summary>
+
+<br>
 
 ```
-crates/renuevo-core   biblioteca sin GUI: io (decode/encode/ICC/HEIC), verify, export,
-                      restore (deblock, chroma, nlm, noise, sharpen), upscale (lanczos, easu, rcas),
-                      pipeline, batch, metrics (PSNR/SSIM)
-crates/renuevo-app    GUI con eframe/egui 0.37: visor, paneles, lotes, trabajos en segundo plano,
-                      tema y controles de macOS (theme, widgets) y barra de menús (menu, con muda)
+crates/renuevo-core   image library, no GUI: decoding and encoding (incl. HEIC and ICC),
+                      verification, restoration (deblocking, chroma, NLM, sharpening),
+                      upscaling (Lanczos3, EASU, RCAS), batch, PSNR/SSIM metrics
+crates/renuevo-app    the macOS app: eframe/egui 0.37, viewer, settings, batch,
+                      macOS theme and native menu bar
 ```
 
-## Tests y medidas
+- **Performance.** On an Apple M5 with a 12 MP photo, verifying an exact copy takes 0.06 s,
+  restoring 1.1 s and upscaling ×2 0.3–0.5 s.
+- **Optional PNG compression.** The maximum PNG compression uses
+  [oxipng](https://github.com/oxipng/oxipng). Files come out about 10% smaller and never bigger,
+  but saving is several times slower.
+- **Tests.** They check bit-exact round trips (PNG 8/16, TIFF, WebP), byte-exact ICC profiles,
+  metadata stripping, real HEIC decoding, CMYK against macOS's own rendering, and that restoring
+  and upscaling measurably improve PSNR/SSIM. GUI tests run headless with `egui_kittest`.
 
 ```sh
-cargo test --workspace                                   # núcleo + GUI (egui_kittest, sin ventana)
-cargo run --release -p renuevo-core --example bench      # rendimiento con 12 MP
-cargo run --release -p renuevo-core --example quality -- original.png degradada.jpg
-RENUEVO_PHOTO=foto.heic RENUEVO_OUT=capturas \
-  cargo test --release -p renuevo-app --test render -- --ignored   # capturas reales con GPU
+cargo test --workspace                                   # core + GUI
+cargo run --release -p renuevo-core --example bench      # speed on a 12 MP photo
 ```
 
-Los tests comprueban la ida y vuelta bit a bit (PNG 8/16, TIFF, WebP), el ICC byte a byte, la orientación,
-que se elimina el EXIF con GPS, la decodificación HEIC real (generado con `sips` y `heif-enc`: gris, giros,
-alfa premultiplicado), CMYK frente al render de macOS, `gAMA`/`cHRM`, los DPI, y que restaurar y
-ampliar **mejoran** el PSNR/SSIM frente a la referencia: ruido +7 dB, JPEG con ruido +3,5 dB, ampliar ×2
-por encima del bilineal, y que una JPEG limpia no empeora.
+The screenshots in this README come from the `readme_screenshots` test in
+`crates/renuevo-app/tests/render.rs` and `scripts/frame-screenshots.swift`.
 
-Rendimiento en un Apple M5 (10 hilos), foto de 12 MP: verificar la copia exacta 0,06 s · restaurar 1,1 s ·
-ampliar ×2 0,3–0,5 s · todo junto 1,5 s.
+</details>
 
-## Limitaciones conocidas
+## Credits and license
 
-La app avisa en el panel de la foto de todo lo que no puede copiar:
-
-- **CMYK sin perfil incrustado**: solo queda la conversión ingenua de `image` («los colores pueden
-  cambiar»). Con perfil se convierte con gestión de color.
-- **HDR**: los mapas de ganancia de las fotos HDR del iPhone (y Ultra HDR / ISO 21496) no caben en
-  PNG/TIFF/WebP: se copia la foto normal (SDR) y se avisa.
-- **Varias imágenes**: de un TIFF de varias páginas, un PNG/WebP animado o un HEIF con varias imágenes
-  o con secuencia solo se copia la primera (o la principal), y se avisa.
-- **WebP** no guarda DPI y admite como máximo 16383 px por lado (se avisa antes de procesar).
-- Lo que va **dentro de los propios píxeles** (marcas de agua invisibles, datos escondidos en el alfa)
-  se conserva: la copia exacta no cambia ningún píxel.
-- **TIFF poco habituales** que no se pueden abrir (con un error claro, nunca con colores erróneos): gris
-  con alfa, CMYK con canal alfa, CMYK en planos separados, YCbCr (con submuestreo o JPEG dentro) y Lab.
-  Tampoco los JPEG CMYK con la K a más resolución que C, M y Y (el decodificador los leería mal).
-- Un **JPEG o HEIC cortado o dañado** se abre igual, con la parte que falta en gris, verde o un color
-  plano, y se avisa.
-- **Renuevo.app** no recibe archivos desde el Finder («Abrir con» o soltarlos en el icono del Dock):
-  winit, la capa de ventanas de egui, no lo ofrece, y añadirlo exige código `unsafe` de AppKit, que el
-  proyecto no permite. Se abren con ⌘O o soltándolos en la ventana.
-
-## Licencias
-
-Código propio bajo MIT. EASU y RCAS son ports de AMD FidelityFX FSR 1 (MIT): ver
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), que también lista las licencias de las librerías
-que lleva Renuevo.app.
+- **Code.** Renuevo's own code is MIT-licensed. EASU and RCAS are ports of AMD FidelityFX FSR 1
+  (MIT). [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists them and the libraries bundled
+  in Renuevo.app.
+- **Sample photo.** The photo in the screenshots is
+  ["San Juan Valley"](https://commons.wikimedia.org/wiki/File:San_Juan_Valley.jpg) by Wilfredor
+  (Wikimedia Commons, [CC0](https://creativecommons.org/publicdomain/zero/1.0/)). Noise and JPEG
+  compression were added for the demo.
